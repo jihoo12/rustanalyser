@@ -7,14 +7,14 @@ name = "rust-analyzer-db"
 version = "0.2.0"
 description = "Professional Rust code analysis tool using tree-sitter — extracts, indexes, and analyzes Rust source code with call graphs, complexity metrics, and dependency tracking."
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "codeanalyser" }]
 keywords = ["rust", "analysis", "tree-sitter", "code-analysis", "call-graph"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -47,7 +47,7 @@ dev = [
 rust-analyzer-db = "rust_analyzer.cli:main"
 
 [project.urls]
-Repository = "https://github.com/codeanalyser/codeanalyser"
+Repository = "https://github.com/jihoo12/rustanalyser"
 
 [tool.hatch.build.targets.wheel]
 packages = ["rust_analyzer"]
