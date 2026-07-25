@@ -311,6 +311,27 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Start the web frontend server."""
+    try:
+        import uvicorn
+    except ImportError:
+        log.error("uvicorn is required for the web server. Install with: pip install uvicorn")
+        return 1
+
+    from .web import create_app
+
+    if not Path(args.db).exists():
+        log.error("Database not found: %s. Run 'scan' first.", args.db)
+        return 1
+
+    app = create_app(args.db)
+    log.info("Starting web server at http://%s:%d", args.host, args.port)
+    log.info("Database: %s", args.db)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    return 0
+
+
 def cmd_graph(args: argparse.Namespace) -> int:
     """Render a call graph."""
     db = RustCodeDB(args.db)
@@ -597,6 +618,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Output format (default svg)")
     g.add_argument("-o", "--output", default="callgraph.svg", help="Output file path")
     g.set_defaults(func=cmd_graph)
+
+    # serve
+    sv = sub.add_parser("serve", help="Start the web frontend server", parents=[db_parent])
+    sv.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    sv.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
+    sv.set_defaults(func=cmd_serve)
 
     return p
 

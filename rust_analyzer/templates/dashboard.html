@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Rust Analyzer{% endblock %}
+{% block topbar_title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="cards">
+  <div class="card">
+    <div class="card-label">Files</div>
+    <div class="card-value">{{ n_files }}</div>
+    <div class="card-sub">Rust source files scanned</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Total Items</div>
+    <div class="card-value">{{ total_items }}</div>
+    <div class="card-sub">Extracted code entities</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Call Edges</div>
+    <div class="card-value">{{ total_calls }}</div>
+    <div class="card-sub">{{ resolved_calls }} resolved statically</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Public API</div>
+    <div class="card-value">{{ pub_count }}</div>
+    <div class="card-sub">Public items</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Avg Complexity</div>
+    <div class="card-value">{{ "%.1f"|format(avg_complexity) }}</div>
+    <div class="card-sub">Cyclomatic (functions)</div>
+  </div>
+  <div class="card">
+    <div class="card-label">External Deps</div>
+    <div class="card-value">{{ n_extern_crates }}</div>
+    <div class="card-sub">extern crate declarations</div>
+  </div>
+</div>
+
+<div class="chart-grid">
+  <div class="chart-box">
+    <div class="chart-box-title">Items by Kind</div>
+    <canvas id="chart-items-kind" height="220"></canvas>
+  </div>
+  <div class="chart-box">
+    <div class="chart-box-title">Complexity Distribution</div>
+    <canvas id="chart-complexity" height="220"></canvas>
+  </div>
+  <div class="chart-box">
+    <div class="chart-box-title">Top Files by LOC</div>
+    <canvas id="chart-files" height="220"></canvas>
+  </div>
+  <div class="chart-box">
+    <div class="chart-box-title">Call Resolution</div>
+    <canvas id="chart-resolution" height="220"></canvas>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-header">
+    <span class="panel-title">Most Complex Functions</span>
+    <a href="/complexity" class="btn">View All</a>
+  </div>
+  <div class="panel-body no-pad">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Function</th>
+            <th>Kind</th>
+            <th>CC</th>
+            <th>Cog</th>
+            <th>LOC</th>
+            <th>Location</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in top_complex %}
+          <tr>
+            <td class="mono">{{ row.name }}</td>
+            <td><span class="badge badge-{{ row.kind }}">{{ row.kind }}</span></td>
+            <td class="mono {% if row.cyclomatic_complexity >= 10 %}cx-high{% elif row.cyclomatic_complexity >= 5 %}cx-medium{% else %}cx-low{% endif %}">
+              {{ row.cyclomatic_complexity }}
+            </td>
+            <td class="mono">{{ row.cognitive_complexity }}</td>
+            <td class="mono">{{ row.lines_of_code }}</td>
+            <td class="muted mono" style="font-size:11px">{{ row.file_path }}:{{ row.start_line }}</td>
+          </tr>
+          {% endfor %}
+          {% if not top_complex %}
+          <tr><td colspan="6" class="muted" style="text-align:center;padding:24px">No functions found</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  const kindData = {{ kind_labels|tojson }};
+  const kindCounts = {{ kind_counts|tojson }};
+  const cxLabels = {{ cx_labels|tojson }};
+  const cxCounts = {{ cx_counts|tojson }};
+  const fileLabels = {{ file_labels|tojson }};
+  const fileCounts = {{ file_counts|tojson }};
+  const resolvedCount = {{ resolved_calls }};
+  const unresolvedCount = {{ total_calls - resolved_calls }};
+
+  const colors = ['#6366f1','#22c55e','#f59e0b','#ef4444','#ec4899','#a855f7','#38bdf8','#fb923c','#f87171','#86efac'];
+
+  new Chart(document.getElementById('chart-items-kind'), {
+    type: 'doughnut',
+    data: {
+      labels: kindData,
+      datasets: [{ data: kindCounts, backgroundColor: colors, borderWidth: 0 }]
+    },
+    options: {
+      plugins: { legend: { position: 'right', labels: { color: '#8b8fa3', font: { size: 11 }, padding: 8 } } },
+      cutout: '60%'
+    }
+  });
+
+  new Chart(document.getElementById('chart-complexity'), {
+    type: 'bar',
+    data: {
+      labels: cxLabels,
+      datasets: [{ data: cxCounts, backgroundColor: '#6366f1', borderRadius: 4, barPercentage: 0.7 }]
+    },
+    options: {
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#5a5e72', font: { size: 10 } }, grid: { display: false } },
+        y: { ticks: { color: '#5a5e72', font: { size: 10 } }, grid: { color: '#1e2235' } }
+      }
+    }
+  });
+
+  new Chart(document.getElementById('chart-files'), {
+    type: 'bar',
+    data: {
+      labels: fileLabels,
+      datasets: [{ data: fileCounts, backgroundColor: '#3b82f6', borderRadius: 4, barPercentage: 0.7 }]
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#5a5e72', font: { size: 10 } }, grid: { color: '#1e2235' } },
+        y: { ticks: { color: '#5a5e72', font: { size: 10 } }, grid: { display: false } }
+      }
+    }
+  });
+
+  new Chart(document.getElementById('chart-resolution'), {
+    type: 'doughnut',
+    data: {
+      labels: ['Resolved', 'Unresolved'],
+      datasets: [{ data: [resolvedCount, unresolvedCount], backgroundColor: ['#22c55e', '#5a5e72'], borderWidth: 0 }]
+    },
+    options: {
+      plugins: { legend: { position: 'bottom', labels: { color: '#8b8fa3', font: { size: 11 }, padding: 12 } } },
+      cutout: '65%'
+    }
+  });
+});
+</script>
+{% endblock %}

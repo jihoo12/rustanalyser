@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Call Graph — Rust Analyzer{% endblock %}
+{% block topbar_title %}Call Graph{% endblock %}
+
+{% block head %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/vis-network.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="controls" style="margin-bottom:16px">
+  <form method="get" action="/graph" class="controls" id="graph-form">
+    <input type="text" name="root" placeholder="Root function name..." value="{{ root_name }}" style="width:200px">
+    <select name="direction">
+      <option value="both" {% if direction == 'both' %}selected{% endif %}>Both</option>
+      <option value="callees" {% if direction == 'callees' %}selected{% endif %}>Callees</option>
+      <option value="callers" {% if direction == 'callers' %}selected{% endif %}>Callers</option>
+    </select>
+    <label style="font-size:12px;color:var(--text-secondary)">Depth:</label>
+    <input type="number" name="depth" value="{{ depth }}" min="1" max="10" style="width:60px">
+    <label style="font-size:12px;display:flex;align-items:center;gap:4px;color:var(--text-secondary)">
+      <input type="checkbox" name="unresolved" {% if not no_unresolved %}checked{% endif %}> Show external
+    </label>
+    <button type="submit" class="btn btn-primary">Generate</button>
+  </form>
+</div>
+
+<div class="panel">
+  <div class="panel-header">
+    <span class="panel-title">{{ title }}</span>
+    <span style="font-size:12px;color:var(--text-muted)">{{ node_count }} nodes, {{ edge_count }} edges</span>
+  </div>
+  <div class="panel-body no-pad">
+    <div id="graph-container"></div>
+  </div>
+</div>
+
+{% if node_count > 400 %}
+<div style="padding:8px 0;font-size:12px;color:var(--warning)">
+  Large graph: try narrowing with a --root function or unchecking "Show external" to reduce clutter.
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+const nodesData = {{ nodes_json|safe }};
+const edgesData = {{ edges_json|safe }};
+
+if (nodesData.length > 0) {
+  const nodes = new vis.DataSet(nodesData.map(n => ({
+    id: n.id,
+    label: n.label || '?',
+    color: n.kind === 'function' ? '#6366f1' : n.kind === 'method' ? '#22c55e' : '#5a5e72',
+    shape: n.kind === 'external' ? 'ellipse' : 'box',
+    font: { color: '#e1e4ed', size: 12 },
+    title: n.kind + ': ' + n.label
+  })));
+  const edges = new vis.DataSet(edgesData.map(e => ({
+    from: e.from, to: e.to,
+    color: { color: '#3a3d4e', highlight: '#6366f1' },
+    arrows: 'to', smooth: { type: 'dynamic' }
+  })));
+  const container = document.getElementById('graph-container');
+  const big = nodesData.length > 400;
+  const network = new vis.Network(container, { nodes, edges }, {
+    nodes: { margin: 8, borderWidth: 0 },
+    physics: {
+      solver: big ? 'barnesHut' : 'forceAtlas2Based',
+      stabilization: { enabled: true, iterations: big ? 150 : 250, fit: true }
+    },
+    interaction: { hover: true, tooltipDelay: 100 }
+  });
+  network.once('stabilizationIterationsDone', () => network.setOptions({ physics: false }));
+  setTimeout(() => { network.setOptions({ physics: false }); network.fit(); }, 8000);
+}
+</script>
+{% endblock %}

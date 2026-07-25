@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Search — Rust Analyzer{% endblock %}
+{% block topbar_title %}Search{% endblock %}
+
+{% block content %}
+<div class="panel">
+  <div class="panel-header">
+    <span class="panel-title">Full-Text Search</span>
+  </div>
+  <div class="panel-body">
+    <form method="get" action="/search" class="controls">
+      <input type="text" name="q" placeholder="Search name, signature, doc, source..." value="{{ query }}" style="width:400px" autofocus>
+      <select name="kind">
+        <option value="">All kinds</option>
+        {% for k in all_kinds %}
+        <option value="{{ k }}" {% if kind_filter == k %}selected{% endif %}>{{ k }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-primary">Search</button>
+    </form>
+  </div>
+</div>
+
+{% if query %}
+<div class="panel">
+  <div class="panel-header">
+    <span class="panel-title">Results for "{{ query }}" ({{ rows|length }})</span>
+  </div>
+  <div class="panel-body no-pad">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Kind</th>
+            <th>Name</th>
+            <th>Signature</th>
+            <th>File</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+          <tr>
+            <td><span class="badge badge-{{ row.kind }}">{{ row.kind }}</span></td>
+            <td class="mono">{{ row.name }}</td>
+            <td class="mono" style="font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ row.signature or '' }}</td>
+            <td class="muted mono" style="font-size:11px">{{ row.file_path }}:{{ row.start_line }}</td>
+            <td>
+              <button class="btn" onclick="showSource({{ row.id }})" title="View source">{'{{ '{' }}</button>
+            </td>
+          </tr>
+          {% endfor %}
+          {% if not rows %}
+          <tr><td colspan="5" class="muted" style="text-align:center;padding:24px">No results</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="modal-overlay" id="source-modal" style="display:none" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="modal-title">Source</h3>
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div id="modal-meta" style="margin-bottom:12px;font-size:12px;color:var(--text-secondary)"></div>
+      <pre class="source-viewer" id="modal-source"></pre>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function showSource(id) {
+  const resp = await fetch('/api/item/' + id);
+  if (!resp.ok) return;
+  const item = await resp.json();
+  document.getElementById('modal-title').textContent = item.kind + ' ' + item.name;
+  document.getElementById('modal-meta').textContent = item.file_path + ':' + item.start_line + '-' + item.end_line;
+  document.getElementById('modal-source').textContent = item.source || '(no source)';
+  document.getElementById('source-modal').style.display = 'flex';
+}
+function closeModal() { document.getElementById('source-modal').style.display = 'none'; }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+</script>
+{% endblock %}

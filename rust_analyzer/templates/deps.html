@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Dependencies — Rust Analyzer{% endblock %}
+{% block topbar_title %}Dependencies{% endblock %}
+
+{% block content %}
+{% if extern_crates %}
+<div class="panel">
+  <div class="panel-header">
+    <span class="panel-title">External Crates ({{ extern_crates|length }})</span>
+  </div>
+  <div class="panel-body">
+    <div class="dep-grid">
+      {% for r in extern_crates %}
+      <div class="dep-item">
+        <div class="dep-item-name">{{ r.name }}</div>
+        {% if r.alias %}<div class="dep-item-count">as {{ r.alias }}</div>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="panel">
+  <div class="panel-header">
+    <span class="panel-title">Use Declarations ({{ crate_groups|length }} top-level crates)</span>
+    <div class="controls">
+      <label style="font-size:12px;color:var(--text-secondary)">
+        <input type="checkbox" id="show-all" onchange="toggleAll()"> Show all paths
+      </label>
+    </div>
+  </div>
+  <div class="panel-body">
+    {% for crate_name, paths in crate_groups.items() %}
+    <div style="margin-bottom:12px">
+      <div style="font-weight:600;color:var(--accent);font-size:13px;margin-bottom:4px">
+        {{ crate_name }} <span style="font-weight:400;color:var(--text-muted);font-size:11px">({{ paths|length }} imports)</span>
+      </div>
+      <ul class="use-tree all-paths" style="display:none">
+        {% for p in paths|sort %}
+        <li><span class="use-crate">{{ crate_name }}</span><span class="use-sep">::</span>{{ p.split('::')[1:]|join('::') }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endfor %}
+    {% if not crate_groups %}
+    <div class="empty-state">
+      <h3>No use declarations found</h3>
+      <p>Run <code>scan</code> first to populate the database.</p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function toggleAll() {
+  const show = document.getElementById('show-all').checked;
+  document.querySelectorAll('.all-paths').forEach(el => el.style.display = show ? 'block' : 'none');
+}
+</script>
+{% endblock %}

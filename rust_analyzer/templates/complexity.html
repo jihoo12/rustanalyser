@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Complexity — Rust Analyzer{% endblock %}
+{% block topbar_title %}Complexity Report{% endblock %}
+
+{% block content %}
+<div class="controls" style="margin-bottom:16px">
+  <form method="get" action="/complexity" class="controls">
+    <label style="font-size:13px;color:var(--text-secondary)">Min complexity:</label>
+    <input type="number" name="min" value="{{ min_cx }}" min="1" max="100" style="width:80px">
+    <button type="submit" class="btn btn-primary">Apply</button>
+  </form>
+</div>
+
+<div class="cards" style="grid-template-columns: repeat(3, 1fr)">
+  <div class="card">
+    <div class="card-label">Functions Above Threshold</div>
+    <div class="card-value">{{ rows|length }}</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Max Cyclomatic</div>
+    <div class="card-value">{{ max_cc }}</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Max Cognitive</div>
+    <div class="card-value">{{ max_cog }}</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-header">
+    <span class="panel-title">Functions with Complexity >= {{ min_cx }}</span>
+  </div>
+  <div class="panel-body no-pad">
+    <div class="table-wrap" style="max-height:600px;overflow-y:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>Function</th>
+            <th>Kind</th>
+            <th>Cyclomatic</th>
+            <th>Cognitive</th>
+            <th>Nesting</th>
+            <th>Branches</th>
+            <th>Calls</th>
+            <th>LOC</th>
+            <th>Location</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+          <tr>
+            <td class="mono">{{ row.name }}</td>
+            <td><span class="badge badge-{{ row.kind }}">{{ row.kind }}</span></td>
+            <td class="mono">
+              <span class="cx-bar" style="width:{{ [row.cyclomatic_complexity * 4, 100] | min }}px;background:{% if row.cyclomatic_complexity >= 10 %}var(--danger){% elif row.cyclomatic_complexity >= 5 %}var(--warning){% else %}var(--success){% endif %}"></span>
+              <span class="{% if row.cyclomatic_complexity >= 10 %}cx-high{% elif row.cyclomatic_complexity >= 5 %}cx-medium{% else %}cx-low{% endif %}">{{ row.cyclomatic_complexity }}</span>
+            </td>
+            <td class="mono">{{ row.cognitive_complexity }}</td>
+            <td class="mono">{{ row.nesting_depth }}</td>
+            <td class="mono">{{ row.num_branches }}</td>
+            <td class="mono">{{ row.num_function_calls }}</td>
+            <td class="mono">{{ row.lines_of_code }}</td>
+            <td class="muted mono" style="font-size:11px">{{ row.file_path }}:{{ row.start_line }}</td>
+            <td>
+              <button class="btn" onclick="showSource({{ row.id }})" title="View source">{'{{ '{' }}</button>
+            </td>
+          </tr>
+          {% endfor %}
+          {% if not rows %}
+          <tr><td colspan="10" class="muted" style="text-align:center;padding:24px">No functions above threshold</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Source modal -->
+<div class="modal-overlay" id="source-modal" style="display:none" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="modal-title">Source</h3>
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div id="modal-meta" style="margin-bottom:12px;font-size:12px;color:var(--text-secondary)"></div>
+      <pre class="source-viewer" id="modal-source"></pre>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function showSource(id) {
+  const resp = await fetch('/api/item/' + id);
+  if (!resp.ok) return;
+  const item = await resp.json();
+  document.getElementById('modal-title').textContent = item.kind + ' ' + item.name;
+  document.getElementById('modal-meta').textContent = item.file_path + ':' + item.start_line + '-' + item.end_line;
+  document.getElementById('modal-source').textContent = item.source || '(no source)';
+  document.getElementById('source-modal').style.display = 'flex';
+}
+function closeModal() { document.getElementById('source-modal').style.display = 'none'; }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+</script>
+{% endblock %}

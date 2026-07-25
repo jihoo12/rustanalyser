@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Items — Rust Analyzer{% endblock %}
+{% block topbar_title %}Code Items{% endblock %}
+
+{% block content %}
+<div class="panel">
+  <div class="panel-header">
+    <span class="panel-title">All Items ({{ total }})</span>
+    <form method="get" action="/items" class="controls">
+      <select name="kind" onchange="this.form.submit()">
+        <option value="">All kinds</option>
+        {% for k in all_kinds %}
+        <option value="{{ k }}" {% if kind_filter == k %}selected{% endif %}>{{ k }}</option>
+        {% endfor %}
+      </select>
+      <input type="text" name="name" placeholder="Filter by name..." value="{{ name_filter }}" style="width:200px">
+      <input type="text" name="file" placeholder="Filter by file..." value="{{ file_filter }}" style="width:200px">
+      <button type="submit" class="btn btn-primary">Filter</button>
+      {% if kind_filter or name_filter or file_filter %}
+      <a href="/items" class="btn">Clear</a>
+      {% endif %}
+    </form>
+  </div>
+  <div class="panel-body no-pad">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Kind</th>
+            <th>Name</th>
+            <th>Visibility</th>
+            <th>Target</th>
+            <th>Signature</th>
+            <th>CC</th>
+            <th>Location</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in items %}
+          <tr>
+            <td class="muted">{{ row.id }}</td>
+            <td><span class="badge badge-{{ row.kind }}">{{ row.kind }}</span></td>
+            <td class="mono">{{ row.name }}</td>
+            <td class="muted">{{ row.visibility or '' }}</td>
+            <td class="muted mono" style="font-size:11px">{{ row.target or '' }}</td>
+            <td class="mono" style="font-size:11px;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ row.signature or '' }}</td>
+            <td class="mono {% if row.cyclomatic_complexity and row.cyclomatic_complexity >= 10 %}cx-high{% elif row.cyclomatic_complexity and row.cyclomatic_complexity >= 5 %}cx-medium{% else %}cx-low{% endif %}">
+              {{ row.cyclomatic_complexity or '' }}
+            </td>
+            <td class="muted mono" style="font-size:11px">{{ row.file_path }}:{{ row.start_line }}</td>
+            <td>
+              <button class="btn" onclick="showSource({{ row.id }})" title="View source">{'{{ '{' }}</button>
+            </td>
+          </tr>
+          {% endfor %}
+          {% if not items %}
+          <tr><td colspan="9" class="muted" style="text-align:center;padding:24px">No items found</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% if total_pages > 1 %}
+  <div class="pagination">
+    {% if page > 1 %}
+    <a href="?page={{ page-1 }}&kind={{ kind_filter }}&name={{ name_filter }}&file={{ file_filter }}">Prev</a>
+    {% endif %}
+    {% for p in range(1, total_pages+1) %}
+    {% if p == page %}
+    <button class="active">{{ p }}</button>
+    {% elif p <= 3 or p > total_pages - 3 or (p >= page - 1 and p <= page + 1) %}
+    <a href="?page={{ p }}&kind={{ kind_filter }}&name={{ name_filter }}&file={{ file_filter }}"><button>{{ p }}</button></a>
+    {% elif p == 4 or p == total_pages - 3 %}
+    <button disabled>...</button>
+    {% endif %}
+    {% endfor %}
+    {% if page < total_pages %}
+    <a href="?page={{ page+1 }}&kind={{ kind_filter }}&name={{ name_filter }}&file={{ file_filter }}">Next</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+<!-- Source modal -->
+<div class="modal-overlay" id="source-modal" style="display:none" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="modal-title">Source</h3>
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div id="modal-meta" style="margin-bottom:12px;font-size:12px;color:var(--text-secondary)"></div>
+      <pre class="source-viewer" id="modal-source"></pre>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function showSource(id) {
+  const resp = await fetch('/api/item/' + id);
+  if (!resp.ok) return;
+  const item = await resp.json();
+  document.getElementById('modal-title').textContent = item.kind + ' ' + item.name;
+  document.getElementById('modal-meta').textContent = item.file_path + ':' + item.start_line + '-' + item.end_line;
+  document.getElementById('modal-source').textContent = item.source || '(no source)';
+  document.getElementById('source-modal').style.display = 'flex';
+}
+function closeModal() {
+  document.getElementById('source-modal').style.display = 'none';
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+</script>
+{% endblock %}

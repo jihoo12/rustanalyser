@@ -28,6 +28,10 @@ classifiers = [
 dependencies = [
     "tree-sitter>=0.23",
     "tree-sitter-rust>=0.24",
+    "fastapi>=0.100",
+    "uvicorn>=0.23",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.6",
 ]
 
 [project.optional-dependencies]
@@ -36,9 +40,6 @@ dev = [
     "pytest-cov>=4.0",
     "mypy>=1.0",
     "ruff>=0.4",
-]
-rich = [
-    "rich>=13.0",
 ]
 
 [project.scripts]

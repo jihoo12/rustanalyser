@@ -20,6 +20,8 @@ extracts code entities, computes static metrics, and stores everything in a
 - **JSON output**: all commands support `--json` for machine-readable output
 - **Incremental scanning**: unchanged files skipped by content hash
 - **Structured logging**: configurable verbosity and format
+- **Web frontend**: master-panel dashboard with interactive call graph, complexity
+  report, API surface, dependency analysis, and search
 
 ## Install
 
@@ -30,7 +32,7 @@ pip install -e ".[dev]"
 Or with just dependencies:
 
 ```bash
-pip install tree-sitter tree-sitter-rust
+pip install tree-sitter tree-sitter-rust fastapi uvicorn jinja2 python-multipart
 ```
 
 Python 3.10+ required.
@@ -124,6 +126,33 @@ rust-analyzer-db graph --db rust_code.db --json
 Flags: `--direction callees|callers|both`, `--no-unresolved`,
 `--format svg|png|pdf|dot|html`.
 
+### 11. Web frontend
+
+```bash
+# Start the web UI (default: http://localhost:8000)
+rust-analyzer-db serve --db rust_code.db
+
+# Custom host/port
+rust-analyzer-db serve --db rust_code.db --host 0.0.0.0 --port 8080
+```
+
+The web frontend provides a master-panel style dashboard with:
+
+- **Dashboard** — project stats, top complex functions, item kind distribution,
+  complexity histogram, largest files
+- **Items** — filterable/sortable/paginated browser for all extracted code
+  entities, with source view modals
+- **Complexity** — ranked complexity report with adjustable threshold and
+  progress-bar indicators
+- **Call graph** — interactive vis-network visualization with root/depth/direction
+  controls
+- **API surface** — public items grouped by kind
+- **Dependencies** — extern crates and `use` declaration tree
+- **Search** — full-text search across names, signatures, docs, and source
+
+All pages also expose JSON endpoints at `/api/stats`, `/api/item/{id}`,
+and `/api/graph-data`.
+
 ## What gets captured per item
 
 - `kind`, `name`, `visibility`, `target`, `trait_name`
@@ -174,6 +203,18 @@ rust_analyzer/
   db.py             - SQLite storage layer (schema + queries)
   extractor.py      - tree-sitter extraction + metrics
   graph.py          - Call graph construction + rendering
+  web.py            - FastAPI web frontend + JSON API
   exceptions.py     - Exception hierarchy
   logging.py        - Structured logging configuration
+  static/
+    style.css       - Dark master-panel theme
+  templates/
+    base.html       - Shared layout with sidebar navigation
+    dashboard.html  - Stats cards + charts
+    items.html      - Filterable item browser
+    complexity.html - Complexity report
+    graph.html      - Interactive vis-network call graph
+    api_surface.html - Public API grouped by kind
+    deps.html       - Dependencies tree
+    search.html     - Full-text search
 ```
