@@ -100,6 +100,135 @@ def _output_json(data: Any) -> None:
     print(json.dumps(data, indent=2, default=str))
 
 
+# ------------------------------------------------------------------
+# Auto .gitignore / AGENTS.md helpers
+# ------------------------------------------------------------------
+
+_AGENTS_MD_TEMPLATE = """\
+# MCP Tools: rust-analyzer-db
+
+This project uses **rust-analyzer-db** for Rust code analysis via MCP tools.
+
+## Quick Start
+
+1. First, scan the project: `scan_project(path="/path/to/project")`
+2. Verify scan: `get_stats()`
+3. Use analysis tools as needed
+
+## Available Tools
+
+### Scanning & Stats
+| Tool | Description |
+|------|-------------|
+| `scan_project` | Scan Rust project and populate database |
+| `get_stats` | Project overview (files, items, call edges) |
+| `list_files` | List all scanned files |
+
+### Code Querying
+| Tool | Description |
+|------|-------------|
+| `search_code` | Search code by name, kind, pattern |
+| `list_items` | List code items (with rich filtering) |
+| `get_item` | Get specific code item details |
+| `get_item_children` | Get child items (methods in impl, etc.) |
+| `get_item_source` | Get source code of a code item |
+| `get_item_generics` | Get generic params of a code item |
+| `get_item_lifetimes` | Get lifetime params of a code item |
+| `list_use_decls` | List use declarations |
+| `list_extern_crates` | List extern crate declarations |
+
+### Analysis
+| Tool | Description |
+|------|-------------|
+| `complexity_report` | Find complex code |
+| `most_complex_items` | Most complex items in project |
+| `get_item_complexity` | Get complexity details |
+| `call_graph_info` | Call graph analysis |
+| `api_surface` | Public API surface |
+| `module_structure` | Module hierarchy |
+
+### Finding
+| Tool | Description |
+|------|-------------|
+| `find_item` | Find item by name (fuzzy) |
+| `callers_of` | Find functions that call a given function |
+| `callees_of` | Find functions called by a given function |
+| `find_unused_imports` | Find use declarations not referenced |
+| `implementors_of_trait` | Find types implementing a trait |
+
+### Large/Complex
+| Tool | Description |
+|------|-------------|
+| `get_largest_files` | Largest files by LOC |
+| `get_most_complex` | Most complex items |
+| `find_dead_code` | Find unreferenced functions/classes |
+| `file_metrics` | File-level metrics |
+
+## Typical Flow
+
+1. `scan_project(path="/path/to/rust/project")` → populate DB
+2. `get_stats()` → verify extraction
+3. `search_code(query="fn", kind="function")` → browse functions
+4. `complexity_report(threshold=5)` → find hotspots
+5. `call_graph_info(name="main")` → understand call flow
+6. `api_surface()` → review public API
+
+## Tips
+
+- Use `kind` filter: "function", "method", "struct", "impl", "trait", etc.
+- Results are paginated — use `offset` and `limit`.
+- `call_graph_info` shows callers and callees (use `depth` 1-5).
+- `complexity_report` sorts by cyclomatic complexity.
+"""
+
+
+def _ensure_gitignore(project_path: Path, db_filename: str) -> tuple[bool, str]:
+    """Add db_filename to .gitignore if not already present. Returns (was_added, message)."""
+    gitignore_path = project_path / ".gitignore"
+
+    if gitignore_path.exists():
+        content = gitignore_path.read_text(encoding="utf-8")
+        if db_filename in content:
+            return False, ""
+    else:
+        content = ""
+
+    entry = f"\n# rust-analyzer-db database\n{db_filename}\n"
+
+    try:
+        if content and not content.endswith("\n"):
+            entry = "\n" + entry
+        gitignore_path.write_text(content + entry, encoding="utf-8")
+        return True, f"Added {db_filename} to .gitignore"
+    except Exception as e:
+        return False, f"Warning: Could not update .gitignore: {e}"
+
+
+def _ensure_agents_md(project_path: Path, db_filename: str) -> tuple[bool, str]:
+    """Create or append AGENTS.md with MCP tool documentation. Returns (was_added, message)."""
+    agents_path = project_path / "AGENTS.md"
+
+    if agents_path.exists():
+        existing = agents_path.read_text(encoding="utf-8")
+        if "rust-analyzer-db" in existing:
+            return False, ""
+
+        append = f"\n\n---\n\n<!-- code-review-graph MCP tools -->\n{_AGENTS_MD_TEMPLATE}"
+        try:
+            if not existing.endswith("\n"):
+                append = "\n" + append
+            agents_path.write_text(existing + append, encoding="utf-8")
+            return True, "Appended rust-analyzer-db section to AGENTS.md"
+        except Exception as e:
+            return False, f"Warning: Could not update AGENTS.md: {e}"
+    else:
+        try:
+            agents_path.write_text(_AGENTS_MD_TEMPLATE, encoding="utf-8")
+            return True, "Created AGENTS.md with MCP documentation"
+        except Exception as e:
+            return False, f"Warning: Could not create AGENTS.md: {e}"
+
+
 def _output_rows(rows: list[Any], fields: list[str] | None = None) -> list[dict[str, Any]]:
     """Convert rows to list of dicts."""
     return [dict(r) for r in rows]
@@ -200,6 +329,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
         scanned, skipped, errors, total_items, total_uses, total_externs,
         args.db, elapsed,
     )
+
+    # Auto-update .gitignore and AGENTS.md
+    if scanned > 0:
+        db_filename = Path(args.db).name
+        project_dir = root if root.is_dir() else root.parent
+        gitignore_added, gitignore_msg = _ensure_gitignore(project_dir, db_filename)
+        agents_added, agents_msg = _ensure_agents_md(project_dir, db_filename)
+        if gitignore_added:
+            log.info("  %s", gitignore_msg)
+        if agents_added:
+            log.info("  %s", agents_msg)
+
     db.close()
     return 0
 

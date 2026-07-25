@@ -26,70 +26,7 @@ from .db import RustCodeDB
 
 _db_path: str = "rust_code.db"
 
-# Default AGENTS.md content for MCP tool documentation
-_AGENTS_MD_TEMPLATE = """# MCP Tools: rust-analyzer-db
 
-This project uses **rust-analyzer-db** for Rust code analysis via MCP tools.
-
-## Quick Start
-
-1. First, scan the project: `scan_project(path="/path/to/project")`
-2. Verify scan: `get_stats()`
-3. Use analysis tools as needed
-
-## Available Tools
-
-### Scanning & Stats
-| Tool | Description |
-|------|-------------|
-| `scan_project` | Scan Rust project and populate database |
-| `get_stats` | Project overview (files, items, call edges) |
-| `list_files` | List all scanned files |
-| `get_file_info` | Get detailed file information |
-| `file_metrics` | Get file-level metrics (complexity, LOC) |
-
-### Querying Code
-| Tool | Description |
-|------|-------------|
-| `list_items` | List code items with filters (kind, name, pub, async, etc.) |
-| `get_item` | Get full item details by ID |
-| `search_code` | Full-text search (FTS5 syntax) |
-| `methods_of` | List methods on a type/trait |
-| `get_item_generics` | Get generic type parameters |
-| `get_item_lifetimes` | Get lifetime parameters |
-
-### Call Analysis
-| Tool | Description |
-|------|-------------|
-| `call_graph_info` | Get call graph for function or project |
-| `callers_of` | Find all callers of a function |
-| `callees_of` | Find all callees of a function |
-
-### Code Quality
-| Tool | Description |
-|------|-------------|
-| `complexity_report` | Find complex functions |
-| `get_most_complex` | Top N most complex functions |
-| `find_unused_imports` | Find unused use declarations |
-| `find_dead_code` | Find functions with zero callers |
-
-### Structure & API
-| Tool | Description |
-|------|-------------|
-| `api_surface` | List all public API items |
-| `dependencies` | Show external dependencies |
-| `module_structure` | Show module hierarchy |
-| `implementors_of_trait` | Find types implementing a trait |
-| `get_largest_files` | Get largest files by LOC |
-
-## Tips
-
-- Always run `scan_project` first before using other tools
-- Use `get_stats()` to verify scan was successful
-- Tools return JSON for easy parsing
-- Use `force=true` in scan_project to re-san all files
-
-"""
 
 
 def _get_db() -> RustCodeDB:
@@ -106,64 +43,7 @@ def _row(row) -> dict:
     return dict(row)
 
 
-def _ensure_gitignore(project_path: Path, db_filename: str) -> tuple[bool, str]:
-    """Ensure the database file is in .gitignore.
-    
-    Returns (was_added, message) tuple.
-    """
-    gitignore_path = project_path / ".gitignore"
-    
-    # Check if .gitignore exists
-    if gitignore_path.exists():
-        content = gitignore_path.read_text(encoding="utf-8")
-        # Check if db is already ignored
-        if db_filename in content:
-            return False, ""
-    else:
-        content = ""
-    
-    # Add to .gitignore
-    entry = f"\n# rust-analyzer-db database\n{db_filename}\n"
-    
-    try:
-        if content and not content.endswith("\n"):
-            entry = "\n" + entry
-        gitignore_path.write_text(content + entry, encoding="utf-8")
-        return True, f"Added {db_filename} to .gitignore"
-    except Exception as e:
-        return False, f"Warning: Could not update .gitignore: {e}"
 
-
-def _ensure_agents_md(project_path: Path, db_filename: str) -> tuple[bool, str]:
-    """Ensure AGENTS.md exists with MCP tool documentation.
-    
-    Returns (was_created_or_updated, message) tuple.
-    """
-    agents_path = project_path / "AGENTS.md"
-    
-    # Check if AGENTS.md already has rust-analyzer-db section
-    if agents_path.exists():
-        content = agents_path.read_text(encoding="utf-8")
-        if "rust-analyzer-db" in content:
-            return False, ""
-    
-    # Create or append AGENTS.md
-    template = _AGENTS_MD_TEMPLATE.replace("rust_code.db", db_filename)
-    
-    try:
-        if agents_path.exists():
-            # Append to existing file
-            content = agents_path.read_text(encoding="utf-8")
-            if not content.endswith("\n"):
-                template = "\n" + template
-            agents_path.write_text(content + template, encoding="utf-8")
-            return True, "Appended MCP documentation to AGENTS.md"
-        else:
-            # Create new file
-            agents_path.write_text(template, encoding="utf-8")
-            return True, "Created AGENTS.md with MCP documentation"
-    except Exception as e:
-        return False, f"Warning: Could not update AGENTS.md: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +87,7 @@ def scan_project(path: str, force: bool = False) -> str:
     import hashlib
     import time
 
-    from .cli import _hash_bytes, _store_item, _count_items
+    from .cli import _hash_bytes, _store_item, _count_items, _ensure_gitignore, _ensure_agents_md
     from .exceptions import ParseError
     from .extractor import extract_file, extract_calls
 
