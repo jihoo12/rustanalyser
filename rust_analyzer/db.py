@@ -1,53 +1,132 @@
-"""SQLite storage layer for extracted Rust code items."""
+"""SQLite storage layer for extracted Rust code items.
+
+Schema version 2: adds use_declarations, extern_crates, generic_params,
+lifetime_params, and complexity_metrics tables for deeper analysis.
+"""
+
+from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Optional
+
+from .exceptions import DatabaseError
+from .logging import get_logger
+
+log = get_logger("db")
+
+SCHEMA_VERSION = 2
 
 SCHEMA = """
+-- Files table
 CREATE TABLE IF NOT EXISTS files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     path TEXT UNIQUE NOT NULL,
     mtime REAL,
-    hash TEXT
+    hash TEXT,
+    total_lines INTEGER DEFAULT 0,
+    scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Items table (structs, enums, functions, methods, etc.)
 CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL,          -- struct, enum, trait, impl, function, method, const, static, mod, macro, type_alias
-    name TEXT NOT NULL,          -- item name (e.g. struct name, fn name)
-    target TEXT,                 -- for impl/method: the type or trait being implemented on
-    trait_name TEXT,             -- for impl: the trait name if `impl Trait for Type`
-    visibility TEXT,             -- pub, pub(crate), private, etc.
-    signature TEXT,              -- one-line signature (for functions/methods)
-    doc TEXT,                    -- doc comment attached to the item
-    attributes TEXT,             -- derive/attribute lines attached to the item
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    target TEXT,
+    trait_name TEXT,
+    visibility TEXT,
+    signature TEXT,
+    doc TEXT,
+    attributes TEXT,
     start_line INTEGER NOT NULL,
     end_line INTEGER NOT NULL,
-    source TEXT NOT NULL,        -- full source text of the item
-    parent_id INTEGER REFERENCES items(id) ON DELETE CASCADE  -- e.g. method's parent impl block
+    source TEXT NOT NULL,
+    parent_id INTEGER REFERENCES items(id) ON DELETE CASCADE,
+    -- new analysis columns
+    is_pub INTEGER DEFAULT 0,
+    is_const_fn INTEGER DEFAULT 0,
+    is_async INTEGER DEFAULT 0,
+    is_unsafe INTEGER DEFAULT 0,
+    cyclomatic_complexity INTEGER DEFAULT 1,
+    cognitive_complexity INTEGER DEFAULT 0,
+    nesting_depth INTEGER DEFAULT 0,
+    num_branches INTEGER DEFAULT 0,
+    num_function_calls INTEGER DEFAULT 0,
+    lines_of_code INTEGER DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_items_name ON items(name);
 CREATE INDEX IF NOT EXISTS idx_items_kind ON items(kind);
 CREATE INDEX IF NOT EXISTS idx_items_target ON items(target);
 CREATE INDEX IF NOT EXISTS idx_items_file ON items(file_id);
+CREATE INDEX IF NOT EXISTS idx_items_parent ON items(parent_id);
 
+-- Call edges (function/method call resolution)
 CREATE TABLE IF NOT EXISTS calls (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     caller_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-    callee_name TEXT NOT NULL,   -- simple function/method name as written
-    receiver TEXT,               -- e.g. "self", a var name, or a Type/module path
-    is_method_call INTEGER NOT NULL,  -- 1 for `x.foo()`, 0 for `foo()` / `Type::foo()`
+    callee_name TEXT NOT NULL,
+    receiver TEXT,
+    is_method_call INTEGER NOT NULL,
     line INTEGER,
-    callee_id INTEGER REFERENCES items(id) ON DELETE SET NULL  -- resolved target, if found
+    callee_id INTEGER REFERENCES items(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller_id);
 CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_id);
 CREATE INDEX IF NOT EXISTS idx_calls_callee_name ON calls(callee_name);
 
+-- Use declarations
+CREATE TABLE IF NOT EXISTS use_declarations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    alias TEXT,
+    is_glob INTEGER DEFAULT 0,
+    start_line INTEGER NOT NULL,
+    end_line INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_uses_file ON use_declarations(file_id);
+CREATE INDEX IF NOT EXISTS idx_uses_path ON use_declarations(path);
+
+-- Extern crate declarations
+CREATE TABLE IF NOT EXISTS extern_crates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    alias TEXT,
+    start_line INTEGER NOT NULL,
+    end_line INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_extern_file ON extern_crates(file_id);
+
+-- Generic type parameters
+CREATE TABLE IF NOT EXISTS generic_params (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    bounds TEXT,
+    default_val TEXT,
+    kind TEXT DEFAULT 'type'  -- 'type' or 'const'
+);
+
+CREATE INDEX IF NOT EXISTS idx_generics_item ON generic_params(item_id);
+
+-- Lifetime parameters
+CREATE TABLE IF NOT EXISTS lifetime_params (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    bounds TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_lifetimes_item ON lifetime_params(item_id);
+
+-- FTS5 index for full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
     name, target, signature, doc, source, content='items', content_rowid='id'
 );
@@ -72,24 +151,32 @@ END;
 
 
 class RustCodeDB:
-    def __init__(self, db_path: str):
+    """SQLite-backed storage for Rust code analysis data."""
+
+    def __init__(self, db_path: str) -> None:
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
+        try:
+            self.conn = sqlite3.connect(db_path)
+        except sqlite3.Error as e:
+            raise DatabaseError(f"Cannot open database {db_path}: {e}") from e
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.executescript(SCHEMA)
         self.conn.commit()
 
-    def close(self):
+    def close(self) -> None:
         self.conn.close()
 
-    def __enter__(self):
+    def __enter__(self) -> RustCodeDB:
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, *exc: Any) -> None:
         self.close()
 
-    # -- file management -------------------------------------------------
+    # ------------------------------------------------------------------
+    # File management
+    # ------------------------------------------------------------------
 
     def upsert_file(self, path: str, mtime: float, file_hash: str) -> int:
         cur = self.conn.cursor()
@@ -101,9 +188,8 @@ class RustCodeDB:
             )
             self.conn.commit()
             return cur.lastrowid
-        file_id = row["id"]
+        file_id: int = row["id"]
         if row["hash"] != file_hash:
-            # file changed: clear old items, refresh metadata
             cur.execute("DELETE FROM items WHERE file_id = ?", (file_id,))
             cur.execute(
                 "UPDATE files SET mtime = ?, hash = ? WHERE id = ?",
@@ -112,13 +198,21 @@ class RustCodeDB:
             self.conn.commit()
         return file_id
 
+    def update_file_lines(self, file_id: int, total_lines: int) -> None:
+        self.conn.execute(
+            "UPDATE files SET total_lines = ? WHERE id = ?",
+            (total_lines, file_id),
+        )
+
     def file_unchanged(self, path: str, file_hash: str) -> bool:
         row = self.conn.execute(
             "SELECT hash FROM files WHERE path = ?", (path,)
         ).fetchone()
         return row is not None and row["hash"] == file_hash
 
-    # -- item management --------------------------------------------------
+    # ------------------------------------------------------------------
+    # Item management
+    # ------------------------------------------------------------------
 
     def insert_item(
         self,
@@ -128,6 +222,7 @@ class RustCodeDB:
         start_line: int,
         end_line: int,
         source: str,
+        *,
         target: Optional[str] = None,
         trait_name: Optional[str] = None,
         visibility: Optional[str] = None,
@@ -135,55 +230,148 @@ class RustCodeDB:
         doc: Optional[str] = None,
         attributes: Optional[str] = None,
         parent_id: Optional[int] = None,
+        is_pub: bool = False,
+        is_const_fn: bool = False,
+        is_async: bool = False,
+        is_unsafe: bool = False,
+        cyclomatic_complexity: int = 1,
+        cognitive_complexity: int = 0,
+        nesting_depth: int = 0,
+        num_branches: int = 0,
+        num_function_calls: int = 0,
+        lines_of_code: int = 0,
     ) -> int:
         cur = self.conn.cursor()
         cur.execute(
             """INSERT INTO items
                (file_id, kind, name, target, trait_name, visibility, signature,
-                doc, attributes, start_line, end_line, source, parent_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                doc, attributes, start_line, end_line, source, parent_id,
+                is_pub, is_const_fn, is_async, is_unsafe,
+                cyclomatic_complexity, cognitive_complexity, nesting_depth,
+                num_branches, num_function_calls, lines_of_code)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 file_id, kind, name, target, trait_name, visibility, signature,
                 doc, attributes, start_line, end_line, source, parent_id,
+                int(is_pub), int(is_const_fn), int(is_async), int(is_unsafe),
+                cyclomatic_complexity, cognitive_complexity, nesting_depth,
+                num_branches, num_function_calls, lines_of_code,
             ),
         )
         return cur.lastrowid
 
-    def commit(self):
+    def insert_generic_params(
+        self, item_id: int, generics: list[tuple[str, str, Optional[str]]]
+    ) -> None:
+        """Insert generic parameters. Each tuple: (name, bounds, default)."""
+        cur = self.conn.cursor()
+        for name, bounds, default in generics:
+            cur.execute(
+                "INSERT INTO generic_params (item_id, name, bounds, default_val) VALUES (?,?,?,?)",
+                (item_id, name, bounds, default),
+            )
+
+    def insert_lifetime_params(
+        self, item_id: int, lifetimes: list[tuple[str, str]]
+    ) -> None:
+        """Insert lifetime parameters. Each tuple: (name, bounds)."""
+        cur = self.conn.cursor()
+        for name, bounds in lifetimes:
+            cur.execute(
+                "INSERT INTO lifetime_params (item_id, name, bounds) VALUES (?,?,?)",
+                (item_id, name, bounds),
+            )
+
+    def commit(self) -> None:
         self.conn.commit()
 
-    # -- call graph -----------------------------------------------------
+    # ------------------------------------------------------------------
+    # Use declarations / extern crates
+    # ------------------------------------------------------------------
 
-    def clear_calls_for_file(self, file_id: int):
+    def insert_use_decl(
+        self, file_id: int, path: str, alias: Optional[str],
+        is_glob: bool, start_line: int, end_line: int,
+    ) -> int:
+        cur = self.conn.cursor()
+        cur.execute(
+            "INSERT INTO use_declarations (file_id, path, alias, is_glob, start_line, end_line) "
+            "VALUES (?,?,?,?,?,?)",
+            (file_id, path, alias, int(is_glob), start_line, end_line),
+        )
+        return cur.lastrowid
+
+    def insert_extern_crate(
+        self, file_id: int, name: str, alias: Optional[str],
+        start_line: int, end_line: int,
+    ) -> int:
+        cur = self.conn.cursor()
+        cur.execute(
+            "INSERT INTO extern_crates (file_id, name, alias, start_line, end_line) "
+            "VALUES (?,?,?,?,?)",
+            (file_id, name, alias, start_line, end_line),
+        )
+        return cur.lastrowid
+
+    def get_use_declarations(self, file_id: Optional[int] = None) -> list[sqlite3.Row]:
+        if file_id is not None:
+            return self.conn.execute(
+                "SELECT u.*, f.path AS file_path FROM use_declarations u "
+                "JOIN files f ON u.file_id = f.id WHERE u.file_id = ? ORDER BY u.start_line",
+                (file_id,),
+            ).fetchall()
+        return self.conn.execute(
+            "SELECT u.*, f.path AS file_path FROM use_declarations u "
+            "JOIN files f ON u.file_id = f.id ORDER BY f.path, u.start_line"
+        ).fetchall()
+
+    def get_extern_crates(self, file_id: Optional[int] = None) -> list[sqlite3.Row]:
+        if file_id is not None:
+            return self.conn.execute(
+                "SELECT e.*, f.path AS file_path FROM extern_crates e "
+                "JOIN files f ON e.file_id = f.id WHERE e.file_id = ? ORDER BY e.start_line",
+                (file_id,),
+            ).fetchall()
+        return self.conn.execute(
+            "SELECT e.*, f.path AS file_path FROM extern_crates e "
+            "JOIN files f ON e.file_id = f.id ORDER BY f.path, e.start_line"
+        ).fetchall()
+
+    def all_extern_crates(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT DISTINCT name, alias FROM extern_crates ORDER BY name"
+        ).fetchall()
+
+    # ------------------------------------------------------------------
+    # Call graph
+    # ------------------------------------------------------------------
+
+    def clear_calls_for_file(self, file_id: int) -> None:
         self.conn.execute(
             "DELETE FROM calls WHERE caller_id IN (SELECT id FROM items WHERE file_id = ?)",
             (file_id,),
         )
 
     def insert_call(
-        self, caller_id: int, callee_name: str, line: int,
-        receiver: Optional[str] = None, is_method_call: bool = False,
+        self,
+        caller_id: int,
+        callee_name: str,
+        line: int,
+        receiver: Optional[str] = None,
+        is_method_call: bool = False,
     ) -> int:
         cur = self.conn.cursor()
         cur.execute(
-            """INSERT INTO calls (caller_id, callee_name, receiver, is_method_call, line)
-               VALUES (?, ?, ?, ?, ?)""",
+            "INSERT INTO calls (caller_id, callee_name, receiver, is_method_call, line) "
+            "VALUES (?, ?, ?, ?, ?)",
             (caller_id, callee_name, receiver, int(is_method_call), line),
         )
         return cur.lastrowid
 
-    def resolve_calls(self):
-        """Best-effort static resolution of call edges to concrete items.
-        Heuristics (no full type inference, since Rust dispatch can be
-        dynamic/generic):
-          - method calls (`x.foo()`): prefer a method on the same `target`
-            type as the caller's impl when receiver == 'self'; otherwise
-            match by method name (picks first match if ambiguous).
-          - plain/scoped calls (`foo()` / `Type::foo()`): prefer a function
-            or associated method matching `receiver` as the target type,
-            else fall back to any function with that name.
-        Unresolved calls (external crate, trait object dispatch, etc.) are
-        left with callee_id = NULL.
+    def resolve_calls(self) -> tuple[int, int]:
+        """Best-effort static resolution of call edges.
+
+        Returns (total, resolved) counts.
         """
         cur = self.conn.cursor()
         calls = cur.execute(
@@ -193,14 +381,14 @@ class RustCodeDB:
                WHERE calls.callee_id IS NULL"""
         ).fetchall()
 
+        resolved = 0
         for call in calls:
             callee_id = None
             if call["is_method_call"]:
                 if call["receiver"] == "self" and call["caller_target"]:
                     row = cur.execute(
-                        """SELECT id FROM items
-                           WHERE kind IN ('method') AND name = ? AND target = ?
-                           LIMIT 1""",
+                        "SELECT id FROM items "
+                        "WHERE kind IN ('method') AND name = ? AND target = ? LIMIT 1",
                         (call["callee_name"], call["caller_target"]),
                     ).fetchone()
                     if row:
@@ -216,8 +404,8 @@ class RustCodeDB:
                 if call["receiver"]:
                     short_receiver = call["receiver"].split("::")[-1]
                     row = cur.execute(
-                        """SELECT id FROM items
-                           WHERE kind = 'method' AND name = ? AND target = ? LIMIT 1""",
+                        "SELECT id FROM items "
+                        "WHERE kind = 'method' AND name = ? AND target = ? LIMIT 1",
                         (call["callee_name"], short_receiver),
                     ).fetchone()
                     if row:
@@ -231,9 +419,14 @@ class RustCodeDB:
                         callee_id = row["id"]
             if callee_id is not None:
                 cur.execute("UPDATE calls SET callee_id = ? WHERE id = ?", (callee_id, call["id"]))
+                resolved += 1
         self.conn.commit()
+        total = len(calls) + self.conn.execute(
+            "SELECT COUNT(*) AS n FROM calls WHERE callee_id IS NOT NULL"
+        ).fetchone()["n"]
+        return total, resolved
 
-    def get_calls_from(self, item_id: int):
+    def get_calls_from(self, item_id: int) -> list[sqlite3.Row]:
         return self.conn.execute(
             """SELECT calls.*, callee.name AS callee_resolved_name, callee.kind AS callee_kind,
                       callee.target AS callee_target
@@ -242,7 +435,7 @@ class RustCodeDB:
             (item_id,),
         ).fetchall()
 
-    def get_calls_to(self, item_id: int):
+    def get_calls_to(self, item_id: int) -> list[sqlite3.Row]:
         return self.conn.execute(
             """SELECT calls.*, caller.name AS caller_name, caller.kind AS caller_kind,
                       caller.target AS caller_target
@@ -251,18 +444,15 @@ class RustCodeDB:
             (item_id,),
         ).fetchall()
 
-    def find_callable(self, name: str, target: Optional[str] = None):
-        """Find function/method items matching a name (and optionally a target type)."""
+    def find_callable(self, name: str, target: Optional[str] = None) -> list[sqlite3.Row]:
         q = "SELECT * FROM items WHERE kind IN ('function','method') AND name = ?"
-        params = [name]
+        params: list[Any] = [name]
         if target:
             q += " AND (target = ? OR target IS NULL)"
             params.append(target)
         return self.conn.execute(q, params).fetchall()
 
-    def all_call_edges(self):
-        """All resolved edges as (caller_id, caller_name, caller_target, callee_id,
-        callee_name, callee_target, is_method_call)."""
+    def all_call_edges(self) -> list[sqlite3.Row]:
         return self.conn.execute(
             """SELECT calls.id, calls.caller_id, caller.name AS caller_name,
                       caller.target AS caller_target, caller.kind AS caller_kind,
@@ -274,14 +464,16 @@ class RustCodeDB:
                LEFT JOIN items AS callee ON calls.callee_id = callee.id"""
         ).fetchall()
 
-    def call_graph_stats(self):
+    def call_graph_stats(self) -> tuple[int, int]:
         total = self.conn.execute("SELECT COUNT(*) AS n FROM calls").fetchone()["n"]
         resolved = self.conn.execute(
             "SELECT COUNT(*) AS n FROM calls WHERE callee_id IS NOT NULL"
         ).fetchone()["n"]
         return total, resolved
 
-    # -- queries ------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Queries
+    # ------------------------------------------------------------------
 
     def list_items(
         self,
@@ -290,11 +482,11 @@ class RustCodeDB:
         target: Optional[str] = None,
         file_like: Optional[str] = None,
         limit: int = 200,
-    ):
+    ) -> list[sqlite3.Row]:
         q = """SELECT items.*, files.path AS file_path
                FROM items JOIN files ON items.file_id = files.id
                WHERE 1=1"""
-        params = []
+        params: list[Any] = []
         if kind:
             q += " AND items.kind = ?"
             params.append(kind)
@@ -311,7 +503,7 @@ class RustCodeDB:
         params.append(limit)
         return self.conn.execute(q, params).fetchall()
 
-    def get_item(self, item_id: int):
+    def get_item(self, item_id: int) -> Optional[sqlite3.Row]:
         return self.conn.execute(
             """SELECT items.*, files.path AS file_path
                FROM items JOIN files ON items.file_id = files.id
@@ -319,7 +511,7 @@ class RustCodeDB:
             (item_id,),
         ).fetchone()
 
-    def get_methods_of(self, target: str):
+    def get_methods_of(self, target: str) -> list[sqlite3.Row]:
         return self.conn.execute(
             """SELECT items.*, files.path AS file_path
                FROM items JOIN files ON items.file_id = files.id
@@ -328,13 +520,13 @@ class RustCodeDB:
             (f"%{target}%",),
         ).fetchall()
 
-    def search(self, query: str, kind: Optional[str] = None, limit: int = 100):
+    def search(self, query: str, kind: Optional[str] = None, limit: int = 100) -> list[sqlite3.Row]:
         q = """SELECT items.*, files.path AS file_path
                FROM items_fts
                JOIN items ON items.id = items_fts.rowid
                JOIN files ON items.file_id = files.id
                WHERE items_fts MATCH ?"""
-        params = [query]
+        params: list[Any] = [query]
         if kind:
             q += " AND items.kind = ?"
             params.append(kind)
@@ -342,9 +534,63 @@ class RustCodeDB:
         params.append(limit)
         return self.conn.execute(q, params).fetchall()
 
-    def stats(self):
+    def stats(self) -> tuple[int, list[sqlite3.Row]]:
         rows = self.conn.execute(
             "SELECT kind, COUNT(*) as n FROM items GROUP BY kind ORDER BY n DESC"
         ).fetchall()
         n_files = self.conn.execute("SELECT COUNT(*) AS n FROM files").fetchone()["n"]
         return n_files, rows
+
+    def complexity_report(self, min_complexity: int = 5) -> list[sqlite3.Row]:
+        """Return functions/methods with cyclomatic complexity >= threshold."""
+        return self.conn.execute(
+            """SELECT items.*, files.path AS file_path
+               FROM items JOIN files ON items.file_id = files.id
+               WHERE items.kind IN ('function', 'method')
+                 AND items.cyclomatic_complexity >= ?
+               ORDER BY items.cyclomatic_complexity DESC""",
+            (min_complexity,),
+        ).fetchall()
+
+    def api_surface(self) -> list[sqlite3.Row]:
+        """Return all public items (the public API surface)."""
+        return self.conn.execute(
+            """SELECT items.*, files.path AS file_path
+               FROM items JOIN files ON items.file_id = files.id
+               WHERE items.is_pub = 1
+               ORDER BY items.kind, items.name"""
+        ).fetchall()
+
+    def get_generics(self, item_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM generic_params WHERE item_id = ? ORDER BY name",
+            (item_id,),
+        ).fetchall()
+
+    def get_lifetimes(self, item_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM lifetime_params WHERE item_id = ? ORDER BY name",
+            (item_id,),
+        ).fetchall()
+
+    def most_complex_functions(self, limit: int = 20) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """SELECT items.*, files.path AS file_path
+               FROM items JOIN files ON items.file_id = files.id
+               WHERE items.kind IN ('function', 'method')
+               ORDER BY items.cyclomatic_complexity DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+
+    def largest_files(self, limit: int = 20) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """SELECT files.*, COUNT(items.id) AS item_count,
+                      SUM(items.lines_of_code) AS total_loc
+               FROM files
+               LEFT JOIN items ON items.file_id = files.id
+               GROUP BY files.id
+               ORDER BY total_loc DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()

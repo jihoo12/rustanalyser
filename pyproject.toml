@@ -1,0 +1,69 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rust-analyzer-db"
+version = "0.2.0"
+description = "Professional Rust code analysis tool using tree-sitter — extracts, indexes, and analyzes Rust source code with call graphs, complexity metrics, and dependency tracking."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "codeanalyser" }]
+keywords = ["rust", "analysis", "tree-sitter", "code-analysis", "call-graph"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Compilers",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "tree-sitter>=0.23",
+    "tree-sitter-rust>=0.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "mypy>=1.0",
+    "ruff>=0.4",
+]
+rich = [
+    "rich>=13.0",
+]
+
+[project.scripts]
+rust-analyzer-db = "rust_analyzer.cli:main"
+
+[project.urls]
+Repository = "https://github.com/codeanalyser/codeanalyser"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rust_analyzer"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM", "TCH"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"

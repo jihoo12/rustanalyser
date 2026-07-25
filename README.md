@@ -1,141 +1,179 @@
-# rust_analyzer
+# rust-analyzer-db
 
-A Python tool that uses **tree-sitter** to parse Rust source code, extracts
-structs, enums, traits, impls, functions/methods, consts, statics, mods, and
-macros, and stores everything in a **SQLite** database so you can query it
-back later and pull out exact source code.
+A professional Python tool that uses **tree-sitter** to parse Rust source code,
+extracts code entities, computes static metrics, and stores everything in a
+**SQLite** database for query, search, call-graph analysis, and reporting.
+
+## Features
+
+- **Full extraction**: structs, enums, traits, impls, functions/methods, consts,
+  statics, mods, macros, type aliases, unions, `use` declarations, `extern crate`
+- **Static metrics**: cyclomatic complexity, cognitive complexity, nesting depth,
+  branch count, lines of code per function
+- **Generic parameters & lifetimes**: extracted from structs, functions, impls
+- **Call graph**: whole-project or focused subgraph with Graphviz DOT/SVG/PNG/HTML
+  rendering and interactive vis-network visualization
+- **Public API surface**: identify all public items in a project
+- **Dependency tracking**: `use` declarations and `extern crate` declarations
+- **Complexity report**: find the most complex functions in your codebase
+- **Full-text search**: SQLite FTS5 over name, signature, doc, and source
+- **JSON output**: all commands support `--json` for machine-readable output
+- **Incremental scanning**: unchanged files skipped by content hash
+- **Structured logging**: configurable verbosity and format
 
 ## Install
+
+```bash
+pip install -e ".[dev]"
+```
+
+Or with just dependencies:
 
 ```bash
 pip install tree-sitter tree-sitter-rust
 ```
 
-(Python 3.9+, no other dependencies — the DB is plain SQLite, built into Python.)
+Python 3.10+ required.
 
 ## Usage
-
-Run as a module from the project root (the folder containing `rust_analyzer/`).
 
 ### 1. Scan a project
 
 ```bash
-python3 -m rust_analyzer.cli scan /path/to/rust/project --db rust_code.db
+rust-analyzer-db scan /path/to/rust/project --db rust_code.db
 ```
 
-- Recursively finds all `*.rs` files (skips `target/` and `.git/`).
-- Also works on a single file: `scan src/lib.rs`.
-- Re-running `scan` is **incremental**: unchanged files (by content hash) are
-  skipped. Use `--force` to re-parse everything.
+- Recursively finds all `*.rs` files (skips `target/`, `.git/`, `node_modules/`)
+- Works on a single file: `rust-analyzer-db scan src/lib.rs`
+- Re-running is **incremental** (unchanged files skipped)
+- Use `--force` to re-parse everything, `-q` to suppress progress
 
 ### 2. List items
 
 ```bash
-python3 -m rust_analyzer.cli list --db rust_code.db --kind struct
-python3 -m rust_analyzer.cli list --db rust_code.db --kind function --name parse
-python3 -m rust_analyzer.cli list --db rust_code.db --target MyStruct
+rust-analyzer-db list --kind struct --db rust_code.db
+rust-analyzer-db list --kind function --name parse --db rust_code.db
+rust-analyzer-db list --json --db rust_code.db
 ```
 
-Kinds: `struct`, `enum`, `trait`, `impl`, `function`, `function_sig`, `method`,
-`method_sig`, `const`, `static`, `mod`, `mod_decl`, `macro`, `type_alias`,
-`union`, `assoc_const`, `assoc_type`.
-
-### 3. Show full source code of an item
+### 3. Show full source
 
 ```bash
-python3 -m rust_analyzer.cli show new --db rust_code.db --kind method
+rust-analyzer-db show new --db rust_code.db --kind method
 ```
 
-Prints doc comments, attributes, and the exact source text of every matching
-item (name is a substring match).
-
-### 4. List methods on a type or trait
+### 4. List methods on a type
 
 ```bash
-python3 -m rust_analyzer.cli methods Point --db rust_code.db --full
+rust-analyzer-db methods Point --db rust_code.db --full
 ```
 
 ### 5. Full-text search
 
-Uses SQLite FTS5 over name/signature/doc/source:
-
 ```bash
-python3 -m rust_analyzer.cli search "distance" --db rust_code.db
-python3 -m rust_analyzer.cli search "parse OR tokenize" --db rust_code.db --full
+rust-analyzer-db search "distance" --db rust_code.db
+rust-analyzer-db search "parse OR tokenize" --db rust_code.db --full
 ```
 
-### 6. Stats
+### 6. Project statistics
 
 ```bash
-python3 -m rust_analyzer.cli stats --db rust_code.db
+rust-analyzer-db stats --db rust_code.db
+rust-analyzer-db stats --json --db rust_code.db
 ```
 
-### 7. Execution-flow / call graph
-
-`scan` also records every function/method call it finds (`foo()`, `self.bar()`,
-`Type::baz()`) and does best-effort static resolution to the actual
-function/method definition in the DB. Calls to things outside the scanned
-project (stdlib, external crates, dynamic/trait-object dispatch) stay
-unresolved and show up as gray "external" nodes.
-
-**Whole-project call graph:**
+### 7. Complexity report
 
 ```bash
-python3 -m rust_analyzer.cli graph --db rust_code.db -o callgraph.svg
+rust-analyzer-db complexity --db rust_code.db
+rust-analyzer-db complexity --min 10 --db rust_code.db
 ```
 
-**Focused graph around one function** (what it calls, and what calls it):
+Shows cyclomatic complexity, cognitive complexity, nesting depth, and LOC
+for every function/method above the threshold.
+
+### 8. Public API surface
 
 ```bash
-python3 -m rust_analyzer.cli graph --db rust_code.db --root run_demo --depth 3 -o run_demo.svg
+rust-analyzer-db api --db rust_code.db
+rust-analyzer-db api --json --db rust_code.db
 ```
 
-Useful flags:
+Lists all `pub` items grouped by kind.
 
-- `--direction callees|callers|both` — with `--root`, trace forward (what it
-  calls), backward (what calls it), or both.
-- `--depth N` — how many hops to follow from `--root` (default 2).
-- `--no-unresolved` — hide external/stdlib calls, show only project-internal flow.
-- `--format svg|png|pdf|dot|html` — `svg`/`png`/`pdf` need the `dot` binary
-  from Graphviz (`apt install graphviz` / `brew install graphviz`); if it's
-  missing, a `.dot` file is written instead so you can render it elsewhere.
-  `html` produces a self-contained, pannable/zoomable interactive graph
-  (needs internet access in the browser to load the vis-network script from
-  a CDN) — open it directly in any browser.
-- `--kind function,method` — whole-graph only, restrict which caller kinds
-  to include.
+### 9. Dependency analysis
 
-Node colors: blue = free function, green = method, gray = external/unresolved.
+```bash
+rust-analyzer-db deps --db rust_code.db
+rust-analyzer-db deps --full --db rust_code.db  # show all use paths
+```
 
-Resolution is a heuristic (Rust doesn't always let you know the concrete
-type statically — trait objects, generics, and function pointers can't be
-fully resolved without a real type checker), so treat the graph as a strong
-approximation of execution flow, not a guarantee.
+### 10. Call graph
+
+```bash
+# Whole project
+rust-analyzer-db graph --db rust_code.db -o callgraph.svg
+
+# Focused on one function
+rust-analyzer-db graph --db rust_code.db --root run_demo --depth 3 -o run_demo.svg
+
+# JSON output
+rust-analyzer-db graph --db rust_code.db --json
+```
+
+Flags: `--direction callees|callers|both`, `--no-unresolved`,
+`--format svg|png|pdf|dot|html`.
 
 ## What gets captured per item
 
-- `kind`, `name`, `visibility` (`pub`, `pub(crate)`, ...)
-- `target` / `trait_name` for impls and methods (e.g. `impl Display for Point`)
-- `signature` (functions/methods, without the body)
-- `doc` (`///` / `//!` / `/** */` comments immediately preceding the item)
-- `attributes` (`#[derive(...)]` etc. immediately preceding the item)
-- `start_line` / `end_line` and the owning file path
-- `source` — the exact original source text of the item
-- Methods/assoc items are linked to their parent `impl`/`trait` via `parent_id`
+- `kind`, `name`, `visibility`, `target`, `trait_name`
+- `signature` (functions/methods, without body)
+- `doc` (doc comments), `attributes` (`#[derive(...)]` etc.)
+- `start_line` / `end_line`, `file_path`
+- `source` — exact original source text
+- `is_pub`, `is_const_fn`, `is_async`, `is_unsafe`
+- `cyclomatic_complexity`, `cognitive_complexity`, `nesting_depth`,
+  `num_branches`, `num_function_calls`, `lines_of_code`
+- Generic parameters and lifetime parameters
+- Methods linked to parent impl/trait via `parent_id`
 
 ## Database schema
 
-Two tables: `files` and `items` (plus an `items_fts` FTS5 index kept in sync
-via triggers). See `rust_analyzer/db.py` for the full schema — it's plain
-SQLite, so you can also query `rust_code.db` directly with any SQLite client:
+Two main tables (`files`, `items`) plus `calls`, `use_declarations`,
+`extern_crates`, `generic_params`, `lifetime_params`, and `items_fts`
+(FTS5 index). See `rust_analyzer/db.py` for the full schema.
+
+Query directly:
 
 ```bash
-sqlite3 rust_code.db "SELECT kind, name, target FROM items WHERE kind='impl';"
+sqlite3 rust_code.db "SELECT kind, name, cyclomatic_complexity FROM items WHERE cyclomatic_complexity > 5;"
 ```
 
-## Extending
+## Development
 
-- Add more node kinds in `extractor.py` (`TOP_LEVEL_KINDS` / the
-  `_extract_*` functions) — e.g. `union_item` fields, generics, where-clauses.
-- Swap SQLite for Postgres/MySQL by reimplementing `db.py`'s `RustCodeDB`
-  with the same method signatures.
+```bash
+# Install dev dependencies
+pip install -e ".[dev]"
+
+# Run tests
+pytest tests/ -v
+
+# Type checking
+mypy rust_analyzer/
+
+# Linting
+ruff check rust_analyzer/
+```
+
+## Architecture
+
+```
+rust_analyzer/
+  __init__.py       - Package version
+  cli.py            - CLI commands and argument parsing
+  db.py             - SQLite storage layer (schema + queries)
+  extractor.py      - tree-sitter extraction + metrics
+  graph.py          - Call graph construction + rendering
+  exceptions.py     - Exception hierarchy
+  logging.py        - Structured logging configuration
+```

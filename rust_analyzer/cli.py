@@ -1,34 +1,48 @@
 #!/usr/bin/env python3
-"""rust-analyzer-db: scan Rust source with tree-sitter, store structs/impls/
-functions/etc. in a SQLite DB, and query them back later.
+"""rust-analyzer-db: Professional Rust code analysis tool.
 
-Usage:
-    python -m rust_analyzer.cli scan <path> [--db rust_code.db]
-    python -m rust_analyzer.cli list [--kind struct|enum|trait|impl|function|method] [--name X] [--target X]
-    python -m rust_analyzer.cli show <name> [--kind K] [--full]
-    python -m rust_analyzer.cli methods <TypeName>
-    python -m rust_analyzer.cli search <query>
-    python -m rust_analyzer.cli stats
-    python -m rust_analyzer.cli graph [--root NAME] [--depth 2] [--format svg|png|pdf|dot|html]
+Scans Rust source with tree-sitter, extracts structs/impls/functions/etc.
+into a SQLite DB, and provides query, search, call-graph, complexity
+analysis, and public-API surface commands.
 """
+
+from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import sys
+import time
 from pathlib import Path
+from typing import Any
 
 from .db import RustCodeDB
-from .extractor import extract_file, extract_calls, ExtractedItem
+from .exceptions import AnalysisError, ParseError
+from .extractor import ExtractedItem, FileExtraction, extract_file, extract_calls
 from . import graph as graphmod
+from .logging import get_logger, setup_logging
+
+log = get_logger("cli")
 
 DEFAULT_DB = "rust_code.db"
 
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
 
 def _hash_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _store_item(db: RustCodeDB, file_id: int, item: ExtractedItem, src: bytes, parent_id=None):
+def _store_item(
+    db: RustCodeDB,
+    file_id: int,
+    item: ExtractedItem,
+    src: bytes,
+    parent_id: int | None = None,
+) -> int:
+    complexity = item.complexity
     item_id = db.insert_item(
         file_id=file_id,
         kind=item.kind,
@@ -43,7 +57,30 @@ def _store_item(db: RustCodeDB, file_id: int, item: ExtractedItem, src: bytes, p
         doc=item.doc,
         attributes=item.attributes,
         parent_id=parent_id,
+        is_pub=item.is_pub,
+        is_const_fn=item.is_const_fn,
+        is_async=item.is_async,
+        is_unsafe=item.is_unsafe,
+        cyclomatic_complexity=complexity.cyclomatic if complexity else 1,
+        cognitive_complexity=complexity.cognitive if complexity else 0,
+        nesting_depth=complexity.nesting_depth if complexity else 0,
+        num_branches=complexity.num_branches if complexity else 0,
+        num_function_calls=complexity.num_function_calls if complexity else 0,
+        lines_of_code=complexity.lines_of_code if complexity else 0,
     )
+    # store generic params
+    if item.generic_params:
+        db.insert_generic_params(
+            item_id,
+            [(g.name, ", ".join(g.bounds), g.default) for g in item.generic_params],
+        )
+    # store lifetime params
+    if item.lifetime_params:
+        db.insert_lifetime_params(
+            item_id,
+            [(l.name, ", ".join(l.bounds)) for l in item.lifetime_params],
+        )
+    # extract calls from function/method bodies
     if item.body_node is not None and item.kind in ("function", "method"):
         for edge in extract_calls(item.body_node, src):
             db.insert_call(
@@ -58,18 +95,33 @@ def _store_item(db: RustCodeDB, file_id: int, item: ExtractedItem, src: bytes, p
     return item_id
 
 
-def cmd_scan(args):
+def _output_json(data: Any) -> None:
+    """Print data as JSON to stdout."""
+    print(json.dumps(data, indent=2, default=str))
+
+
+def _output_rows(rows: list[Any], fields: list[str] | None = None) -> list[dict[str, Any]]:
+    """Convert rows to list of dicts."""
+    return [dict(r) for r in rows]
+
+
+# ------------------------------------------------------------------
+# Commands
+# ------------------------------------------------------------------
+
+def cmd_scan(args: argparse.Namespace) -> int:
+    """Scan Rust source files and populate the database."""
     root = Path(args.path)
     if not root.exists():
-        print(f"Path not found: {root}", file=sys.stderr)
+        log.error("Path not found: %s", root)
         return 1
 
     rs_files = [root] if root.is_file() else sorted(root.rglob("*.rs"))
     if not rs_files:
-        print("No .rs files found.")
+        log.info("No .rs files found.")
         return 0
 
-    skip_dirs = {"target", ".git"}
+    skip_dirs = {"target", ".git", "node_modules", ".cargo"}
     rs_files = [
         f for f in rs_files
         if not any(part in skip_dirs for part in f.parts)
@@ -77,128 +129,201 @@ def cmd_scan(args):
 
     db = RustCodeDB(args.db)
     total_items = 0
+    total_uses = 0
+    total_externs = 0
     scanned = 0
     skipped = 0
-    for f in rs_files:
+    errors = 0
+    start_time = time.monotonic()
+
+    for i, f in enumerate(rs_files):
+        if not args.quiet:
+            progress = f"[{i+1}/{len(rs_files)}]" if len(rs_files) > 1 else ""
+            print(f"\r  {progress} Scanning {f}...", end="", flush=True) if len(rs_files) > 10 else None
+
         data = f.read_bytes()
         file_hash = _hash_bytes(data)
         abs_path = str(f.resolve())
         if not args.force and db.file_unchanged(abs_path, file_hash):
             skipped += 1
             continue
+
         file_id = db.upsert_file(abs_path, f.stat().st_mtime, file_hash)
         try:
-            items = extract_file(data)
-        except Exception as e:
-            print(f"  ! failed to parse {f}: {e}", file=sys.stderr)
+            extraction = extract_file(data)
+        except ParseError as e:
+            log.warning("Parse error in %s: %s", f, e.reason)
+            errors += 1
             continue
-        for item in items:
+        except Exception as e:
+            log.error("Failed to parse %s: %s", f, e)
+            errors += 1
+            continue
+
+        for item in extraction.items:
             _store_item(db, file_id, item, data)
+
+        db.update_file_lines(file_id, extraction.total_lines)
+
+        for use in extraction.use_declarations:
+            db.insert_use_decl(
+                file_id, use.path, use.alias, use.is_glob,
+                use.start_line, use.end_line,
+            )
+            total_uses += 1
+
+        for ext in extraction.extern_crates:
+            db.insert_extern_crate(
+                file_id, ext.name, ext.alias, ext.start_line, ext.end_line,
+            )
+            total_externs += 1
+
         db.commit()
-        count = sum(1 + len(i.children) for i in items)
+        count = _count_items(extraction.items)
         total_items += count
         scanned += 1
-        print(f"  {f} -> {count} items")
+        if not args.quiet and len(rs_files) <= 10:
+            log.info("  %s -> %d items (%d LOC)", f, count, extraction.total_lines)
+
+    elapsed = time.monotonic() - start_time
 
     if scanned:
-        db.resolve_calls()
-        total_calls, resolved_calls = db.call_graph_stats()
-        print(f"Resolved {resolved_calls}/{total_calls} call edges.")
+        total, resolved = db.resolve_calls()
+        log.info("Resolved %d/%d call edges.", resolved, total)
 
-    print(f"\nScanned {scanned} file(s), skipped {skipped} unchanged, "
-          f"extracted {total_items} item(s). DB: {args.db}")
+    if not args.quiet:
+        print()  # newline after progress
+    log.info(
+        "Scanned %d file(s), skipped %d unchanged, errors %d, "
+        "extracted %d items, %d use decls, %d extern crates. "
+        "DB: %s (%.1fs)",
+        scanned, skipped, errors, total_items, total_uses, total_externs,
+        args.db, elapsed,
+    )
     db.close()
     return 0
 
 
-def _print_row(row, show_source=False):
+def _count_items(items: list[ExtractedItem]) -> int:
+    """Recursively count items including children."""
+    count = len(items)
+    for item in items:
+        count += _count_items(item.children)
+    return count
+
+
+def _print_row(row: Any, show_source: bool = False) -> None:
     loc = f"{row['file_path']}:{row['start_line']}-{row['end_line']}"
-    header = f"[{row['id']}] {row['kind']:<10} {row['name']}"
+    header = f"[{row['id']}] {row['kind']:<12} {row['name']}"
     if row["target"] and row["kind"] not in ("impl",):
         header += f"  (impl for {row['target']})"
     vis = row["visibility"] or ""
-    print(f"{header}   {vis}   {loc}")
+    cx = ""
+    if row["cyclomatic_complexity"] and row["cyclomatic_complexity"] > 1:
+        cx = f"  CC={row['cyclomatic_complexity']}"
+    print(f"{header}   {vis}{cx}   {loc}")
     if show_source:
         print("-" * 70)
         print(row["source"])
         print("-" * 70)
 
 
-def cmd_list(args):
+def cmd_list(args: argparse.Namespace) -> int:
+    """List items with optional filters."""
     db = RustCodeDB(args.db)
     rows = db.list_items(
         kind=args.kind, name=args.name, target=args.target,
         file_like=args.file, limit=args.limit,
     )
     if not rows:
-        print("No matching items.")
+        log.info("No matching items.")
         return 0
-    for row in rows:
-        _print_row(row)
-    print(f"\n{len(rows)} item(s).")
+
+    if args.json:
+        _output_json(_output_rows(rows))
+    else:
+        for row in rows:
+            _print_row(row)
+        log.info("%d item(s).", len(rows))
     db.close()
     return 0
 
 
-def cmd_show(args):
+def cmd_show(args: argparse.Namespace) -> int:
+    """Show full source code of matching items."""
     db = RustCodeDB(args.db)
     rows = db.list_items(kind=args.kind, name=args.name, limit=args.limit)
     if not rows:
-        print("No matching items.")
+        log.info("No matching items.")
         return 0
-    for row in rows:
-        if row["doc"]:
-            print(row["doc"])
-        if row["attributes"]:
-            print(row["attributes"])
-        _print_row(row, show_source=True)
-        print()
+
+    if args.json:
+        _output_json(_output_rows(rows))
+    else:
+        for row in rows:
+            if row["doc"]:
+                print(row["doc"])
+            if row["attributes"]:
+                print(row["attributes"])
+            _print_row(row, show_source=True)
+            print()
     db.close()
     return 0
 
 
-def cmd_methods(args):
+def cmd_methods(args: argparse.Namespace) -> int:
+    """List methods on a type or trait."""
     db = RustCodeDB(args.db)
     rows = db.get_methods_of(args.target)
     if not rows:
-        print(f"No methods found for '{args.target}'.")
+        log.info("No methods found for '%s'.", args.target)
         return 0
-    for row in rows:
-        _print_row(row, show_source=args.full)
-    print(f"\n{len(rows)} method(s) on types matching '{args.target}'.")
+
+    if args.json:
+        _output_json(_output_rows(rows))
+    else:
+        for row in rows:
+            _print_row(row, show_source=args.full)
+        log.info("%d method(s) on types matching '%s'.", len(rows), args.target)
     db.close()
     return 0
 
 
-def cmd_search(args):
+def cmd_search(args: argparse.Namespace) -> int:
+    """Full-text search over name/signature/doc/source."""
     db = RustCodeDB(args.db)
     try:
         rows = db.search(args.query, kind=args.kind, limit=args.limit)
     except Exception as e:
-        print(f"Search error (try quoting the query): {e}", file=sys.stderr)
+        log.error("Search error (try quoting the query): %s", e)
         return 1
     if not rows:
-        print("No matches.")
+        log.info("No matches.")
         return 0
-    for row in rows:
-        _print_row(row, show_source=args.full)
-    print(f"\n{len(rows)} match(es).")
+
+    if args.json:
+        _output_json(_output_rows(rows))
+    else:
+        for row in rows:
+            _print_row(row, show_source=args.full)
+        log.info("%d match(es).", len(rows))
     db.close()
     return 0
 
 
-def cmd_graph(args):
+def cmd_graph(args: argparse.Namespace) -> int:
+    """Render a call graph."""
     db = RustCodeDB(args.db)
 
     if args.root:
         rows = db.list_items(name=args.root, limit=50)
         rows = [r for r in rows if r["kind"] in ("function", "method")]
         if not rows:
-            print(f"No function/method found matching '{args.root}'.")
+            log.error("No function/method found matching '%s'.", args.root)
             return 1
         root_ids = [r["id"] for r in rows]
         names = ", ".join(f"{r['name']} ({r['file_path']}:{r['start_line']})" for r in rows)
-        print(f"Root node(s): {names}")
+        log.info("Root node(s): %s", names)
         g = graphmod.build_subgraph(
             db, root_ids, depth=args.depth, direction=args.direction,
             include_unresolved=not args.no_unresolved,
@@ -210,70 +335,208 @@ def cmd_graph(args):
         title = "Call graph (whole project)"
 
     if not g.nodes:
-        print("No call edges found. Did you run `scan` on this project?")
+        log.info("No call edges found. Did you run `scan` on this project?")
         return 0
 
-    print(f"Graph: {len(g.nodes)} node(s), {len(g.edges)} edge(s).")
+    log.info("Graph: %d node(s), %d edge(s).", len(g.nodes), len(g.edges))
     if len(g.nodes) > 400:
-        print("This is a large graph — for HTML it will disable physics after an "
-              "initial layout pass to stay responsive. For a clearer picture, try "
-              "--root <function> to focus on one call path, or --no-unresolved to "
-              "drop external/stdlib calls.")
+        log.warning(
+            "Large graph — use --root <function> to focus or --no-unresolved "
+            "to drop external calls."
+        )
 
     fmt = args.format
     out = args.output
+
+    if args.json:
+        _output_json({
+            "title": title,
+            "node_count": len(g.nodes),
+            "edge_count": len(g.edges),
+            "nodes": [{"id": nid, **meta} for nid, meta in g.nodes.items()],
+            "edges": [{"from": s, "to": d} for s, d in sorted(g.edges)],
+        })
+        db.close()
+        return 0
+
     if fmt == "dot":
         dot_str = graphmod.to_dot(g, title)
         Path(out).write_text(dot_str)
-        print(f"Wrote DOT file: {out}")
+        log.info("Wrote DOT file: %s", out)
     elif fmt == "html":
         html_str = graphmod.to_html(g, title)
         Path(out).write_text(html_str)
-        print(f"Wrote interactive HTML: {out} (open in a browser)")
+        log.info("Wrote interactive HTML: %s (open in a browser)", out)
     elif fmt in ("svg", "png", "pdf"):
         dot_str = graphmod.to_dot(g, title)
         try:
             ok = graphmod.render_dot(dot_str, out, fmt)
         except RuntimeError as e:
-            print(f"Graphviz render failed: {e}", file=sys.stderr)
+            log.error("Graphviz render failed: %s", e)
             return 1
         if not ok:
             fallback = str(Path(out).with_suffix(".dot"))
             Path(fallback).write_text(dot_str)
-            print(f"Graphviz 'dot' binary not found; wrote DOT source to {fallback} instead.")
-            print("Install graphviz (e.g. `apt install graphviz`) to render images directly.")
+            log.warning("Graphviz 'dot' not found; wrote DOT to %s", fallback)
         else:
-            print(f"Wrote {fmt.upper()}: {out}")
+            log.info("Wrote %s: %s", fmt.upper(), out)
     db.close()
     return 0
 
 
-def cmd_stats(args):
+def cmd_stats(args: argparse.Namespace) -> int:
+    """Show project statistics."""
     db = RustCodeDB(args.db)
     n_files, rows = db.stats()
-    print(f"Files scanned: {n_files}")
-    print("Items by kind:")
-    for row in rows:
-        print(f"  {row['kind']:<12} {row['n']}")
+    total, resolved = db.call_graph_stats()
+
+    if args.json:
+        data = {
+            "files": n_files,
+            "items_by_kind": {r["kind"]: r["n"] for r in rows},
+            "total_calls": total,
+            "resolved_calls": resolved,
+        }
+        _output_json(data)
+    else:
+        total_items = sum(r["n"] for r in rows)
+        print(f"Files scanned:     {n_files}")
+        print(f"Total items:       {total_items}")
+        print(f"Call edges:        {total} ({resolved} resolved)")
+        print()
+        print("Items by kind:")
+        for row in rows:
+            bar = "█" * min(row["n"], 50)
+            print(f"  {row['kind']:<14} {row['n']:>6}  {bar}")
     db.close()
     return 0
 
 
-def build_parser():
+def cmd_complexity(args: argparse.Namespace) -> int:
+    """Show complexity report for functions/methods."""
+    db = RustCodeDB(args.db)
+    rows = db.complexity_report(min_complexity=args.min_complexity)
+
+    if not rows:
+        log.info("No functions exceed complexity threshold %d.", args.min_complexity)
+        return 0
+
+    if args.json:
+        _output_json(_output_rows(rows))
+    else:
+        print(f"{'Kind':<10} {'Name':<35} {'CC':>4} {'Cog':>4} {'Nest':>5} {'LOC':>5}  Location")
+        print("-" * 90)
+        for row in rows:
+            loc = f"{row['file_path']}:{row['start_line']}"
+            print(
+                f"{row['kind']:<10} {row['name']:<35} "
+                f"{row['cyclomatic_complexity']:>4} {row['cognitive_complexity']:>4} "
+                f"{row['nesting_depth']:>5} {row['lines_of_code']:>5}  {loc}"
+            )
+        log.info("%d function(s) above complexity threshold.", len(rows))
+    db.close()
+    return 0
+
+
+def cmd_api(args: argparse.Namespace) -> int:
+    """Show the public API surface of the project."""
+    db = RustCodeDB(args.db)
+    rows = db.api_surface()
+
+    if not rows:
+        log.info("No public items found.")
+        return 0
+
+    if args.json:
+        _output_json(_output_rows(rows))
+    else:
+        by_kind: dict[str, list[Any]] = {}
+        for row in rows:
+            by_kind.setdefault(row["kind"], []).append(row)
+        for kind in ("struct", "enum", "trait", "function", "method", "const", "type_alias", "union"):
+            items = by_kind.get(kind, [])
+            if not items:
+                continue
+            print(f"\n{kind.upper()} ({len(items)}):")
+            for row in items:
+                vis = row["visibility"] or ""
+                loc = f"{row['file_path']}:{row['start_line']}"
+                sig = f"  {row['signature']}" if row["signature"] else ""
+                print(f"  {vis} {row['name']}{sig}  -- {loc}")
+        log.info("%d public item(s) total.", len(rows))
+    db.close()
+    return 0
+
+
+def cmd_deps(args: argparse.Namespace) -> int:
+    """Show external dependencies (use/extern crate)."""
+    db = RustCodeDB(args.db)
+
+    externs = db.all_extern_crates()
+    uses = db.get_use_declarations()
+
+    if args.json:
+        _output_json({
+            "extern_crates": [dict(r) for r in externs],
+            "use_declarations": [dict(r) for r in uses],
+        })
+    else:
+        if externs:
+            print("External crates:")
+            for r in externs:
+                alias = f" as {r['alias']}" if r["alias"] else ""
+                print(f"  {r['name']}{alias}")
+        else:
+            print("No extern crate declarations found.")
+
+        # Group use paths by top-level crate
+        crate_uses: dict[str, list[str]] = {}
+        for r in uses:
+            path = r["path"]
+            top = path.split("::")[0]
+            crate_uses.setdefault(top, []).append(path)
+
+        if crate_uses:
+            print(f"\nUse declarations ({len(crate_uses)} top-level crates):")
+            for crate_name in sorted(crate_uses):
+                paths = crate_uses[crate_name]
+                print(f"  {crate_name} ({len(paths)} imports)")
+                if args.full:
+                    for p in sorted(paths):
+                        print(f"    use {p};")
+    db.close()
+    return 0
+
+
+# ------------------------------------------------------------------
+# CLI parser
+# ------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
     db_parent = argparse.ArgumentParser(add_help=False)
     db_parent.add_argument("--db", default=DEFAULT_DB, help=f"SQLite DB path (default: {DEFAULT_DB})")
 
-    p = argparse.ArgumentParser(prog="rust_analyzer", description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter,
-                                 parents=[db_parent])
+    output_parent = argparse.ArgumentParser(add_help=False)
+    output_parent.add_argument("--json", action="store_true", help="Output as JSON")
+
+    p = argparse.ArgumentParser(
+        prog="rust-analyzer-db",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[db_parent],
+    )
+    p.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     sub = p.add_subparsers(dest="command", required=True)
 
-    s = sub.add_parser("scan", help="Scan a file or directory of .rs files into the DB", parents=[db_parent])
+    # scan
+    s = sub.add_parser("scan", help="Scan a file or directory of .rs files", parents=[db_parent])
     s.add_argument("path", help="File or directory to scan")
     s.add_argument("--force", action="store_true", help="Re-parse even unchanged files")
+    s.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     s.set_defaults(func=cmd_scan)
 
-    l = sub.add_parser("list", help="List items, optionally filtered", parents=[db_parent])
+    # list
+    l = sub.add_parser("list", help="List items, optionally filtered", parents=[db_parent, output_parent])
     l.add_argument("--kind", help="struct|enum|trait|impl|function|method|const|static|mod|...")
     l.add_argument("--name", help="Substring match on name")
     l.add_argument("--target", help="Substring match on impl/method target type")
@@ -281,51 +544,75 @@ def build_parser():
     l.add_argument("--limit", type=int, default=200)
     l.set_defaults(func=cmd_list)
 
-    sh = sub.add_parser("show", help="Show full source of matching item(s)", parents=[db_parent])
+    # show
+    sh = sub.add_parser("show", help="Show full source of matching item(s)", parents=[db_parent, output_parent])
     sh.add_argument("name", help="Exact-ish name (substring match)")
     sh.add_argument("--kind", help="Restrict to a kind")
     sh.add_argument("--limit", type=int, default=20)
     sh.set_defaults(func=cmd_show)
 
-    m = sub.add_parser("methods", help="List methods implemented on a given type/trait target", parents=[db_parent])
+    # methods
+    m = sub.add_parser("methods", help="List methods on a type/trait", parents=[db_parent, output_parent])
     m.add_argument("target", help="Type name, e.g. MyStruct")
     m.add_argument("--full", action="store_true", help="Print full source of each method")
     m.set_defaults(func=cmd_methods)
 
-    se = sub.add_parser("search", help="Full-text search over name/signature/doc/source", parents=[db_parent])
+    # search
+    se = sub.add_parser("search", help="Full-text search over name/signature/doc/source", parents=[db_parent, output_parent])
     se.add_argument("query", help="FTS5 query, e.g. 'parse OR tokenize'")
     se.add_argument("--kind", help="Restrict to a kind")
     se.add_argument("--limit", type=int, default=50)
     se.add_argument("--full", action="store_true", help="Print full source of each match")
     se.set_defaults(func=cmd_search)
 
-    st = sub.add_parser("stats", help="Show summary counts", parents=[db_parent])
+    # stats
+    st = sub.add_parser("stats", help="Show summary counts", parents=[db_parent, output_parent])
     st.set_defaults(func=cmd_stats)
 
-    g = sub.add_parser("graph", help="Render a call graph (execution flow)", parents=[db_parent])
-    g.add_argument("--root", help="Function/method name to center the graph on (substring match). "
-                                   "If omitted, graphs the whole project.")
+    # complexity
+    cx = sub.add_parser("complexity", help="Show cyclomatic complexity report", parents=[db_parent, output_parent])
+    cx.add_argument("--min", dest="min_complexity", type=int, default=5,
+                    help="Minimum complexity to report (default 5)")
+    cx.set_defaults(func=cmd_complexity)
+
+    # api
+    api = sub.add_parser("api", help="Show public API surface", parents=[db_parent, output_parent])
+    api.set_defaults(func=cmd_api)
+
+    # deps
+    dp = sub.add_parser("deps", help="Show external dependencies (use/extern crate)", parents=[db_parent, output_parent])
+    dp.add_argument("--full", action="store_true", help="Show all use paths (not just crate summary)")
+    dp.set_defaults(func=cmd_deps)
+
+    # graph
+    g = sub.add_parser("graph", help="Render a call graph (execution flow)", parents=[db_parent, output_parent])
+    g.add_argument("--root", help="Function/method name to center on (substring match)")
     g.add_argument("--depth", type=int, default=2, help="BFS depth from --root (default 2)")
     g.add_argument("--direction", choices=["callees", "callers", "both"], default="both",
-                   help="With --root: show what it calls, what calls it, or both (default both)")
-    g.add_argument("--kind", help="Whole-graph only: comma-separated caller kinds to include, "
-                                   "e.g. function,method")
+                   help="With --root: callees, callers, or both (default both)")
+    g.add_argument("--kind", help="Whole-graph only: comma-separated caller kinds")
     g.add_argument("--no-unresolved", action="store_true",
-                   help="Omit calls that couldn't be resolved to a known function/method "
-                        "(external crates, dynamic dispatch, etc.)")
+                   help="Omit calls that couldn't be resolved")
     g.add_argument("--format", choices=["svg", "png", "pdf", "dot", "html"], default="svg",
-                   help="Output format (default svg). 'html' produces an interactive "
-                        "zoomable/pannable graph.")
+                   help="Output format (default svg)")
     g.add_argument("-o", "--output", default="callgraph.svg", help="Output file path")
     g.set_defaults(func=cmd_graph)
 
     return p
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    setup_logging(verbose=getattr(args, "verbose", False))
+    try:
+        return args.func(args)
+    except AnalysisError as e:
+        log.error("%s", e)
+        return 1
+    except KeyboardInterrupt:
+        log.warning("Interrupted.")
+        return 130
 
 
 if __name__ == "__main__":
