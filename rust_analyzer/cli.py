@@ -332,6 +332,19 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mcp(args: argparse.Namespace) -> int:
+    """Start the MCP server over stdio transport."""
+    from .mcp_server import run_server
+
+    if not Path(args.db).exists():
+        log.error("Database not found: %s. Run 'scan' first.", args.db)
+        return 1
+
+    log.info("Starting MCP server (db: %s)", args.db)
+    run_server(args.db)
+    return 0
+
+
 def cmd_graph(args: argparse.Namespace) -> int:
     """Render a call graph."""
     db = RustCodeDB(args.db)
@@ -624,6 +637,10 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     sv.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
     sv.set_defaults(func=cmd_serve)
+
+    # mcp
+    mc = sub.add_parser("mcp", help="Start the MCP server (Model Context Protocol)", parents=[db_parent])
+    mc.set_defaults(func=cmd_mcp)
 
     return p
 

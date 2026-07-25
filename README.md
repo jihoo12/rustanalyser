@@ -22,6 +22,8 @@ extracts code entities, computes static metrics, and stores everything in a
 - **Structured logging**: configurable verbosity and format
 - **Web frontend**: master-panel dashboard with interactive call graph, complexity
   report, API surface, dependency analysis, and search
+- **MCP server**: expose all analysis tools via Model Context Protocol for
+  AI assistants (Claude Code, Claude Desktop, etc.)
 
 ## Install
 
@@ -32,7 +34,7 @@ pip install -e ".[dev]"
 Or with just dependencies:
 
 ```bash
-pip install tree-sitter tree-sitter-rust fastapi uvicorn jinja2 python-multipart
+pip install tree-sitter tree-sitter-rust fastapi uvicorn jinja2 python-multipart "mcp>=1.0,<2"
 ```
 
 Python 3.10+ required.
@@ -153,6 +155,50 @@ The web frontend provides a master-panel style dashboard with:
 All pages also expose JSON endpoints at `/api/stats`, `/api/item/{id}`,
 and `/api/graph-data`.
 
+### 12. MCP server (Model Context Protocol)
+
+```bash
+# Start the MCP server over stdio (for AI assistants)
+rust-analyzer-db mcp --db rust_code.db
+```
+
+Exposes Rust code analysis as **MCP tools** that AI assistants can call
+via the [Model Context Protocol](https://modelcontextprotocol.io).
+
+**Available tools:**
+
+| Tool | Description |
+|------|-------------|
+| `scan_project` | Scan a Rust directory/file into the database |
+| `list_items` | List code items with filters (kind, name, target, file) |
+| `get_item` | Get full source and metadata for an item by ID |
+| `search_code` | Full-text search across names, signatures, docs, source |
+| `get_stats` | Project statistics (files, items, call edges) |
+| `complexity_report` | Find complex functions above a threshold |
+| `api_surface` | List all public API items |
+| `dependencies` | Show extern crates and use declarations |
+| `call_graph_info` | Trace callers/callees for a function, or project stats |
+| `methods_of` | List methods on a type or trait |
+
+**Register with Claude Code:**
+
+```bash
+claude mcp add rust-analyzer-db -- rust-analyzer-db mcp --db /path/to/rust_code.db
+```
+
+**Register with Claude Desktop** — add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "rust-analyzer-db": {
+      "command": "rust-analyzer-db",
+      "args": ["mcp", "--db", "/path/to/rust_code.db"]
+    }
+  }
+}
+```
+
 ## What gets captured per item
 
 - `kind`, `name`, `visibility`, `target`, `trait_name`
@@ -204,6 +250,7 @@ rust_analyzer/
   extractor.py      - tree-sitter extraction + metrics
   graph.py          - Call graph construction + rendering
   web.py            - FastAPI web frontend + JSON API
+  mcp_server.py     - MCP server (Model Context Protocol tools)
   exceptions.py     - Exception hierarchy
   logging.py        - Structured logging configuration
   static/

@@ -10,6 +10,16 @@
         "--repo",
         "/home/jihoo/codeanalyser"
       ]
+    },
+    "rust-analyzer-db": {
+      "type": "local",
+      "command": [
+          "rust-analyzer-db",
+          "mcp",
+          "--db",
+          "rust_code.db"
+      ]
     }
   }
 }
+
