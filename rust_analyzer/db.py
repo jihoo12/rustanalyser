@@ -594,3 +594,166 @@ class RustCodeDB:
                LIMIT ?""",
             (limit,),
         ).fetchall()
+
+    def list_files(self, limit: int = 100) -> list[sqlite3.Row]:
+        """List all scanned files with item counts and total LOC."""
+        return self.conn.execute(
+            """SELECT files.*, COUNT(items.id) AS item_count,
+                      COALESCE(SUM(items.lines_of_code), 0) AS total_loc
+               FROM files
+               LEFT JOIN items ON items.file_id = files.id
+               GROUP BY files.id
+               ORDER BY files.path
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+
+    def get_file(self, file_id: int) -> Optional[sqlite3.Row]:
+        """Get file info by ID with item count."""
+        return self.conn.execute(
+            """SELECT files.*, COUNT(items.id) AS item_count,
+                      COALESCE(SUM(items.lines_of_code), 0) AS total_loc
+               FROM files
+               LEFT JOIN items ON items.file_id = files.id
+               WHERE files.id = ?
+               GROUP BY files.id""",
+            (file_id,),
+        ).fetchone()
+
+    def get_file_by_path(self, path: str) -> Optional[sqlite3.Row]:
+        """Get file info by path with item count."""
+        return self.conn.execute(
+            """SELECT files.*, COUNT(items.id) AS item_count,
+                      COALESCE(SUM(items.lines_of_code), 0) AS total_loc
+               FROM files
+               LEFT JOIN items ON items.file_id = files.id
+               WHERE files.path LIKE ?
+               GROUP BY files.id""",
+            (f"%{path}%",),
+        ).fetchone()
+
+    # ------------------------------------------------------------------
+    # New analysis queries
+    # ------------------------------------------------------------------
+
+    def find_unused_imports(self, file_id: Optional[int] = None) -> list[sqlite3.Row]:
+        """Find use declarations that appear unused in source code.
+        
+        A use declaration is considered potentially unused if its last path
+        component doesn't appear in any item's source code in the same file.
+        This is a heuristic - false positives are possible.
+        """
+        if file_id is not None:
+            uses = self.conn.execute(
+                """SELECT u.*, f.path AS file_path FROM use_declarations u
+                   JOIN files f ON u.file_id = f.id WHERE u.file_id = ?""",
+                (file_id,),
+            ).fetchall()
+        else:
+            uses = self.conn.execute(
+                """SELECT u.*, f.path AS file_path FROM use_declarations u
+                   JOIN files f ON u.file_id = f.id"""
+            ).fetchall()
+
+        unused = []
+        for use in uses:
+            path = use["path"]
+            # Get the last component of the use path (the item being imported)
+            last_component = path.split("::")[-1].strip()
+            if not last_component or last_component == "*":
+                continue
+
+            # Check if this component appears in any source code in the same file
+            fid = use["file_id"]
+            count = self.conn.execute(
+                """SELECT COUNT(*) AS n FROM items 
+                   WHERE file_id = ? AND source LIKE ?""",
+                (fid, f"%{last_component}%"),
+            ).fetchone()["n"]
+            
+            if count == 0:
+                unused.append(use)
+        
+        return unused
+
+    def implementors_of_trait(self, trait_name: str) -> list[sqlite3.Row]:
+        """Find all types that implement a given trait.
+        
+        Returns impl blocks and the types they implement the trait for.
+        """
+        return self.conn.execute(
+            """SELECT items.*, files.path AS file_path
+               FROM items JOIN files ON items.file_id = files.id
+               WHERE items.kind = 'impl' AND items.trait_name LIKE ?
+               ORDER BY items.target""",
+            (f"%{trait_name}%",),
+        ).fetchall()
+
+    def module_structure(self) -> list[sqlite3.Row]:
+        """Return all mod items to show module hierarchy."""
+        return self.conn.execute(
+            """SELECT items.*, files.path AS file_path
+               FROM items JOIN files ON items.file_id = files.id
+               WHERE items.kind = 'mod'
+               ORDER BY files.path, items.start_line"""
+        ).fetchall()
+
+    def find_dead_code(self, min_complexity: int = 0) -> list[sqlite3.Row]:
+        """Find functions/methods with zero callers that could potentially be removed.
+        
+        Excludes: pub functions (part of API), test functions, main functions,
+        and functions with complexity above threshold (might be important).
+        """
+        return self.conn.execute(
+            """SELECT items.*, files.path AS file_path
+               FROM items JOIN files ON items.file_id = files.id
+               WHERE items.kind IN ('function', 'method')
+                 AND items.name NOT IN ('main', 'new', 'default')
+                 AND items.name NOT LIKE 'test_%'
+                 AND items.name NOT LIKE '%_test'
+                 AND (items.is_pub = 0 OR items.cyclomatic_complexity <= ?)
+                 AND items.id NOT IN (
+                     SELECT DISTINCT callee_id FROM calls 
+                     WHERE callee_id IS NOT NULL
+                 )
+               ORDER BY items.cyclomatic_complexity DESC""",
+            (min_complexity,),
+        ).fetchall()
+
+    def file_metrics(self, file_path: Optional[str] = None) -> list[sqlite3.Row]:
+        """Get aggregated metrics for files.
+        
+        Returns file-level stats: item count, avg complexity, total LOC, etc.
+        """
+        if file_path:
+            return self.conn.execute(
+                """SELECT files.path, files.total_lines,
+                          COUNT(items.id) AS item_count,
+                          AVG(items.cyclomatic_complexity) AS avg_complexity,
+                          MAX(items.cyclomatic_complexity) AS max_complexity,
+                          SUM(items.lines_of_code) AS total_item_loc,
+                          SUM(CASE WHEN items.is_pub = 1 THEN 1 ELSE 0 END) AS pub_items,
+                          SUM(CASE WHEN items.kind = 'function' THEN 1 ELSE 0 END) AS functions,
+                          SUM(CASE WHEN items.kind = 'method' THEN 1 ELSE 0 END) AS methods,
+                          SUM(CASE WHEN items.kind IN ('struct', 'enum') THEN 1 ELSE 0 END) AS types
+                   FROM files
+                   LEFT JOIN items ON items.file_id = files.id
+                   WHERE files.path LIKE ?
+                   GROUP BY files.id""",
+                (f"%{file_path}%",),
+            ).fetchall()
+        return self.conn.execute(
+            """SELECT files.path, files.total_lines,
+                      COUNT(items.id) AS item_count,
+                      AVG(items.cyclomatic_complexity) AS avg_complexity,
+                      MAX(items.cyclomatic_complexity) AS max_complexity,
+                      SUM(items.lines_of_code) AS total_item_loc,
+                      SUM(CASE WHEN items.is_pub = 1 THEN 1 ELSE 0 END) AS pub_items,
+                      SUM(CASE WHEN items.kind = 'function' THEN 1 ELSE 0 END) AS functions,
+                      SUM(CASE WHEN items.kind = 'method' THEN 1 ELSE 0 END) AS methods,
+                      SUM(CASE WHEN items.kind IN ('struct', 'enum') THEN 1 ELSE 0 END) AS types
+               FROM files
+               LEFT JOIN items ON items.file_id = files.id
+               GROUP BY files.id
+               ORDER BY total_item_loc DESC"""
+        ).fetchall()
