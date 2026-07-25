@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rust-analyzer-db"
-version = "0.3.0"
+version = "0.3.2"
 description = "Professional Rust code analysis tool using tree-sitter — extracts, indexes, and analyzes Rust source code with call graphs, complexity metrics, and dependency tracking."
 readme = "README.md"
 license = "Apache-2.0"
