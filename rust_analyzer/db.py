@@ -34,6 +34,20 @@ CREATE INDEX IF NOT EXISTS idx_items_kind ON items(kind);
 CREATE INDEX IF NOT EXISTS idx_items_target ON items(target);
 CREATE INDEX IF NOT EXISTS idx_items_file ON items(file_id);
 
+CREATE TABLE IF NOT EXISTS calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    caller_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    callee_name TEXT NOT NULL,   -- simple function/method name as written
+    receiver TEXT,               -- e.g. "self", a var name, or a Type/module path
+    is_method_call INTEGER NOT NULL,  -- 1 for `x.foo()`, 0 for `foo()` / `Type::foo()`
+    line INTEGER,
+    callee_id INTEGER REFERENCES items(id) ON DELETE SET NULL  -- resolved target, if found
+);
+
+CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller_id);
+CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_id);
+CREATE INDEX IF NOT EXISTS idx_calls_callee_name ON calls(callee_name);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
     name, target, signature, doc, source, content='items', content_rowid='id'
 );
@@ -137,6 +151,135 @@ class RustCodeDB:
 
     def commit(self):
         self.conn.commit()
+
+    # -- call graph -----------------------------------------------------
+
+    def clear_calls_for_file(self, file_id: int):
+        self.conn.execute(
+            "DELETE FROM calls WHERE caller_id IN (SELECT id FROM items WHERE file_id = ?)",
+            (file_id,),
+        )
+
+    def insert_call(
+        self, caller_id: int, callee_name: str, line: int,
+        receiver: Optional[str] = None, is_method_call: bool = False,
+    ) -> int:
+        cur = self.conn.cursor()
+        cur.execute(
+            """INSERT INTO calls (caller_id, callee_name, receiver, is_method_call, line)
+               VALUES (?, ?, ?, ?, ?)""",
+            (caller_id, callee_name, receiver, int(is_method_call), line),
+        )
+        return cur.lastrowid
+
+    def resolve_calls(self):
+        """Best-effort static resolution of call edges to concrete items.
+        Heuristics (no full type inference, since Rust dispatch can be
+        dynamic/generic):
+          - method calls (`x.foo()`): prefer a method on the same `target`
+            type as the caller's impl when receiver == 'self'; otherwise
+            match by method name (picks first match if ambiguous).
+          - plain/scoped calls (`foo()` / `Type::foo()`): prefer a function
+            or associated method matching `receiver` as the target type,
+            else fall back to any function with that name.
+        Unresolved calls (external crate, trait object dispatch, etc.) are
+        left with callee_id = NULL.
+        """
+        cur = self.conn.cursor()
+        calls = cur.execute(
+            """SELECT calls.id, calls.callee_name, calls.receiver, calls.is_method_call,
+                      items.target AS caller_target
+               FROM calls JOIN items ON calls.caller_id = items.id
+               WHERE calls.callee_id IS NULL"""
+        ).fetchall()
+
+        for call in calls:
+            callee_id = None
+            if call["is_method_call"]:
+                if call["receiver"] == "self" and call["caller_target"]:
+                    row = cur.execute(
+                        """SELECT id FROM items
+                           WHERE kind IN ('method') AND name = ? AND target = ?
+                           LIMIT 1""",
+                        (call["callee_name"], call["caller_target"]),
+                    ).fetchone()
+                    if row:
+                        callee_id = row["id"]
+                if callee_id is None:
+                    row = cur.execute(
+                        "SELECT id FROM items WHERE kind = 'method' AND name = ? LIMIT 1",
+                        (call["callee_name"],),
+                    ).fetchone()
+                    if row:
+                        callee_id = row["id"]
+            else:
+                if call["receiver"]:
+                    short_receiver = call["receiver"].split("::")[-1]
+                    row = cur.execute(
+                        """SELECT id FROM items
+                           WHERE kind = 'method' AND name = ? AND target = ? LIMIT 1""",
+                        (call["callee_name"], short_receiver),
+                    ).fetchone()
+                    if row:
+                        callee_id = row["id"]
+                if callee_id is None:
+                    row = cur.execute(
+                        "SELECT id FROM items WHERE kind = 'function' AND name = ? LIMIT 1",
+                        (call["callee_name"],),
+                    ).fetchone()
+                    if row:
+                        callee_id = row["id"]
+            if callee_id is not None:
+                cur.execute("UPDATE calls SET callee_id = ? WHERE id = ?", (callee_id, call["id"]))
+        self.conn.commit()
+
+    def get_calls_from(self, item_id: int):
+        return self.conn.execute(
+            """SELECT calls.*, callee.name AS callee_resolved_name, callee.kind AS callee_kind,
+                      callee.target AS callee_target
+               FROM calls LEFT JOIN items AS callee ON calls.callee_id = callee.id
+               WHERE calls.caller_id = ?""",
+            (item_id,),
+        ).fetchall()
+
+    def get_calls_to(self, item_id: int):
+        return self.conn.execute(
+            """SELECT calls.*, caller.name AS caller_name, caller.kind AS caller_kind,
+                      caller.target AS caller_target
+               FROM calls JOIN items AS caller ON calls.caller_id = caller.id
+               WHERE calls.callee_id = ?""",
+            (item_id,),
+        ).fetchall()
+
+    def find_callable(self, name: str, target: Optional[str] = None):
+        """Find function/method items matching a name (and optionally a target type)."""
+        q = "SELECT * FROM items WHERE kind IN ('function','method') AND name = ?"
+        params = [name]
+        if target:
+            q += " AND (target = ? OR target IS NULL)"
+            params.append(target)
+        return self.conn.execute(q, params).fetchall()
+
+    def all_call_edges(self):
+        """All resolved edges as (caller_id, caller_name, caller_target, callee_id,
+        callee_name, callee_target, is_method_call)."""
+        return self.conn.execute(
+            """SELECT calls.id, calls.caller_id, caller.name AS caller_name,
+                      caller.target AS caller_target, caller.kind AS caller_kind,
+                      calls.callee_id, calls.callee_name,
+                      callee.target AS callee_target, callee.kind AS callee_kind,
+                      calls.is_method_call, calls.receiver
+               FROM calls
+               JOIN items AS caller ON calls.caller_id = caller.id
+               LEFT JOIN items AS callee ON calls.callee_id = callee.id"""
+        ).fetchall()
+
+    def call_graph_stats(self):
+        total = self.conn.execute("SELECT COUNT(*) AS n FROM calls").fetchone()["n"]
+        resolved = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM calls WHERE callee_id IS NOT NULL"
+        ).fetchone()["n"]
+        return total, resolved
 
     # -- queries ------------------------------------------------------------
 

@@ -70,6 +70,48 @@ python3 -m rust_analyzer.cli search "parse OR tokenize" --db rust_code.db --full
 python3 -m rust_analyzer.cli stats --db rust_code.db
 ```
 
+### 7. Execution-flow / call graph
+
+`scan` also records every function/method call it finds (`foo()`, `self.bar()`,
+`Type::baz()`) and does best-effort static resolution to the actual
+function/method definition in the DB. Calls to things outside the scanned
+project (stdlib, external crates, dynamic/trait-object dispatch) stay
+unresolved and show up as gray "external" nodes.
+
+**Whole-project call graph:**
+
+```bash
+python3 -m rust_analyzer.cli graph --db rust_code.db -o callgraph.svg
+```
+
+**Focused graph around one function** (what it calls, and what calls it):
+
+```bash
+python3 -m rust_analyzer.cli graph --db rust_code.db --root run_demo --depth 3 -o run_demo.svg
+```
+
+Useful flags:
+
+- `--direction callees|callers|both` — with `--root`, trace forward (what it
+  calls), backward (what calls it), or both.
+- `--depth N` — how many hops to follow from `--root` (default 2).
+- `--no-unresolved` — hide external/stdlib calls, show only project-internal flow.
+- `--format svg|png|pdf|dot|html` — `svg`/`png`/`pdf` need the `dot` binary
+  from Graphviz (`apt install graphviz` / `brew install graphviz`); if it's
+  missing, a `.dot` file is written instead so you can render it elsewhere.
+  `html` produces a self-contained, pannable/zoomable interactive graph
+  (needs internet access in the browser to load the vis-network script from
+  a CDN) — open it directly in any browser.
+- `--kind function,method` — whole-graph only, restrict which caller kinds
+  to include.
+
+Node colors: blue = free function, green = method, gray = external/unresolved.
+
+Resolution is a heuristic (Rust doesn't always let you know the concrete
+type statically — trait objects, generics, and function pointers can't be
+fully resolved without a real type checker), so treat the graph as a strong
+approximation of execution flow, not a guarantee.
+
 ## What gets captured per item
 
 - `kind`, `name`, `visibility` (`pub`, `pub(crate)`, ...)

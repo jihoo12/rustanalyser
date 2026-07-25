@@ -45,6 +45,7 @@ class ExtractedItem:
     doc: Optional[str] = None
     attributes: Optional[str] = None
     children: List["ExtractedItem"] = field(default_factory=list)
+    body_node: Optional[Node] = None  # transient, not persisted to DB
 
 
 def _text(node: Optional[Node], src: bytes) -> Optional[str]:
@@ -107,6 +108,7 @@ def _extract_function(node: Node, src: bytes, kind: str) -> ExtractedItem:
         signature=_function_signature(node, src),
         doc=doc,
         attributes=attrs,
+        body_node=node.child_by_field_name("body"),
     )
 
 
@@ -204,6 +206,66 @@ def _extract_top_level_node(node: Node, src: bytes) -> List[ExtractedItem]:
     if t in TOP_LEVEL_KINDS:
         return [_extract_simple(node, src, TOP_LEVEL_KINDS[t])]
     return []
+
+
+@dataclass
+class CallEdge:
+    callee_name: str      # simple name, e.g. "baz" or "new"
+    receiver: Optional[str]  # "self", a variable/type path, or None for a bare fn call
+    line: int
+    is_method_call: bool  # True if it's `x.foo()`, False if `foo()` or `Type::foo()`
+
+
+def _call_target_name(fn_node: Node, src: bytes) -> Optional[tuple]:
+    """Given the `function` field of a call_expression, return
+    (callee_name, receiver, is_method_call) or None if it can't be resolved
+    to a simple name (e.g. a closure expression being called directly)."""
+    if fn_node.type == "identifier":
+        return _text(fn_node, src), None, False
+    if fn_node.type == "field_expression":
+        field = fn_node.child_by_field_name("field")
+        value = fn_node.child_by_field_name("value")
+        name = _text(field, src)
+        receiver = _text(value, src) if value is not None else None
+        # collapse multi-line/long receivers to keep it readable
+        if receiver and len(receiver) > 40:
+            receiver = receiver[:37] + "..."
+        return name, receiver, True
+    if fn_node.type == "scoped_identifier":
+        path = fn_node.child_by_field_name("path")
+        name_node = fn_node.child_by_field_name("name")
+        name = _text(name_node, src)
+        receiver = _text(path, src) if path is not None else None
+        return name, receiver, False
+    return None
+
+
+def extract_calls(body_node: Node, src: bytes) -> List[CallEdge]:
+    """Walk a function/method body and collect all direct call_expression
+    targets (not recursing into nested function/closure *definitions*, but
+    closures used as immediate call arguments are still walked)."""
+    edges: List[CallEdge] = []
+
+    def walk(node: Node):
+        if node.type == "call_expression":
+            fn_node = node.child_by_field_name("function")
+            resolved = _call_target_name(fn_node, src) if fn_node is not None else None
+            if resolved is not None:
+                name, receiver, is_method = resolved
+                edges.append(CallEdge(
+                    callee_name=name,
+                    receiver=receiver,
+                    line=node.start_point[0] + 1,
+                    is_method_call=is_method,
+                ))
+        # don't descend into nested item definitions (nested fn, impl, etc.)
+        if node.type in TOP_LEVEL_KINDS:
+            return
+        for child in node.children:
+            walk(child)
+
+    walk(body_node)
+    return edges
 
 
 def extract_file(source_code: bytes) -> List[ExtractedItem]:
