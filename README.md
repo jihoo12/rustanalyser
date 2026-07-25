@@ -28,6 +28,10 @@ extracts code entities, computes static metrics, and stores everything in a
 ## Install
 
 ```bash
+pip install rust-analyzer-db
+```
+
+```bash
 pip install -e ".[dev]"
 ```
 
