@@ -3,7 +3,7 @@
 {% block topbar_title %}Call Graph{% endblock %}
 
 {% block head %}
-<script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/vis-network.min.js"></script>
+<script src="/static/vis-network.min.js"></script>
 {% endblock %}
 
 {% block content %}
@@ -47,13 +47,15 @@ const nodesData = {{ nodes_json|safe }};
 const edgesData = {{ edges_json|safe }};
 
 if (nodesData.length > 0) {
+  const big = nodesData.length > 200;
   const nodes = new vis.DataSet(nodesData.map(n => ({
     id: n.id,
     label: n.label || '?',
     color: n.kind === 'function' ? '#6366f1' : n.kind === 'method' ? '#22c55e' : '#5a5e72',
     shape: n.kind === 'external' ? 'ellipse' : 'box',
-    font: { color: '#e1e4ed', size: 12 },
-    title: n.kind + ': ' + n.label
+    font: { color: '#e1e4ed', size: big ? 9 : 12 },
+    title: n.kind + ': ' + n.label,
+    size: big ? 8 : undefined
   })));
   const edges = new vis.DataSet(edgesData.map(e => ({
     from: e.from, to: e.to,
@@ -61,17 +63,37 @@ if (nodesData.length > 0) {
     arrows: 'to', smooth: { type: 'dynamic' }
   })));
   const container = document.getElementById('graph-container');
-  const big = nodesData.length > 400;
   const network = new vis.Network(container, { nodes, edges }, {
-    nodes: { margin: 8, borderWidth: 0 },
+    nodes: { margin: 4, borderWidth: 0 },
     physics: {
-      solver: big ? 'barnesHut' : 'forceAtlas2Based',
-      stabilization: { enabled: true, iterations: big ? 150 : 250, fit: true }
+      solver: 'barnesHut',
+      barnesHut: {
+        gravitationalConstant: big ? -3000 : -1200,
+        centralGravity: 0.15,
+        springLength: big ? 80 : 150,
+        springConstant: 0.02,
+        damping: 0.3
+      },
+      stabilization: {
+        enabled: true,
+        iterations: 500,
+        fit: true,
+        updateInterval: 25
+      }
     },
     interaction: { hover: true, tooltipDelay: 100 }
   });
-  network.once('stabilizationIterationsDone', () => network.setOptions({ physics: false }));
-  setTimeout(() => { network.setOptions({ physics: false }); network.fit(); }, 8000);
+  network.once('stabilizationIterationsDone', () => {
+    network.setOptions({ physics: false });
+    network.fit({ animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
+  });
+  setTimeout(() => {
+    network.setOptions({ physics: false });
+    network.fit({ animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
+  }, 10000);
+} else {
+  document.getElementById('graph-container').innerHTML =
+    '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted)">No nodes to display.</div>';
 }
 </script>
 {% endblock %}
